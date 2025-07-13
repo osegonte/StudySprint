@@ -40,7 +40,14 @@ class PDFViewer(QWidget):
         self.zoom_level = 1.0
         self.pdf_id = None
         self.setup_ui()
+        
+        # Phase 2: Add interaction tracking capability
+        self.session_timer = None
         self.apply_styles()
+        
+    def set_session_timer(self, session_timer):
+        """Set session timer for interaction tracking"""
+        self.session_timer = session_timer
         
     def setup_ui(self):
         layout = QVBoxLayout()
@@ -249,17 +256,29 @@ class PDFViewer(QWidget):
             self.page_spinbox.setValue(self.current_page + 1)
             self.render_current_page()
             
+            # Record interaction for session tracking
+            if self.session_timer:
+                self.session_timer.record_interaction()
+            
     def next_page(self):
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
             self.page_spinbox.setValue(self.current_page + 1)
             self.render_current_page()
             
+            # Record interaction for session tracking
+            if self.session_timer:
+                self.session_timer.record_interaction()
+            
     def goto_page(self, page_num):
         new_page = page_num - 1
         if 0 <= new_page < self.total_pages and new_page != self.current_page:
             self.current_page = new_page
             self.render_current_page()
+            
+            # Record interaction for session tracking
+            if self.session_timer:
+                self.session_timer.record_interaction()
             
     def zoom_in(self):
         if self.zoom_level < 3.0:
@@ -268,12 +287,20 @@ class PDFViewer(QWidget):
             if self.pdf_document:
                 self.render_current_page()
             
+            # Record interaction for session tracking
+            if self.session_timer:
+                self.session_timer.record_interaction()
+            
     def zoom_out(self):
         if self.zoom_level > 0.5:
             self.zoom_level -= 0.25
             self.zoom_label.setText(f"{int(self.zoom_level * 100)}%")
             if self.pdf_document:
                 self.render_current_page()
+            
+            # Record interaction for session tracking
+            if self.session_timer:
+                self.session_timer.record_interaction()
             
     def get_current_page(self):
         return self.current_page + 1 if self.pdf_document else 0
@@ -288,3 +315,26 @@ class PDFViewer(QWidget):
         if self.pdf_document:
             self.pdf_document.close()
         event.accept()
+    def mousePressEvent(self, event):
+        """Handle mouse press events with interaction tracking"""
+        if self.session_timer:
+            self.session_timer.record_interaction()
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        """Handle mouse wheel events with interaction tracking"""
+        if self.session_timer:
+            self.session_timer.record_interaction()
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handle key press events with interaction tracking"""
+        if self.session_timer:
+            self.session_timer.record_interaction()
+        super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events with interaction tracking"""
+        if self.session_timer:
+            self.session_timer.record_interaction()
+        super().mouseMoveEvent(event)

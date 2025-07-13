@@ -154,6 +154,9 @@ class DatabaseManager:
         # Create exercise PDF tables
         self.create_exercise_tables()
         
+        # Create Phase 2 tables
+        # self.create_phase2_tables()  # Temporarily disabled
+        
         logger.info("✅ Database tables created successfully")
         
         # Update schema detection
@@ -506,6 +509,439 @@ class DatabaseManager:
                 'error': str(e),
                 'connection': 'failed'
             }
+    def create_phase2_tables(self):
+        """Create Phase 2 timer and analytics tables"""
+        self.connect()
+        
+        logger.info("Creating Phase 2 tables...")
+        
+        try:
+            # Sessions table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id SERIAL PRIMARY KEY,
+                    pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
+                    exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
+                    topic_id INTEGER,
+                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    total_time_seconds INTEGER DEFAULT 0,
+                    active_time_seconds INTEGER DEFAULT 0,
+                    idle_time_seconds INTEGER DEFAULT 0,
+                    pages_visited INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Page times table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS page_times (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER,
+                    pdf_id INTEGER,
+                    exercise_pdf_id INTEGER,
+                    page_number INTEGER NOT NULL,
+                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    duration_seconds INTEGER DEFAULT 0,
+                    interaction_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_page_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Reading metrics table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reading_metrics (
+                    id SERIAL PRIMARY KEY,
+                    pdf_id INTEGER,
+                    exercise_pdf_id INTEGER,
+                    topic_id INTEGER,
+                    user_id VARCHAR(50) DEFAULT 'default_user',
+                    pages_per_minute DECIMAL(8,2),
+                    average_time_per_page_seconds INTEGER,
+                    total_pages_read INTEGER DEFAULT 0,
+                    total_time_spent_seconds INTEGER DEFAULT 0,
+                    last_calculated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_metrics_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Study goals table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS study_goals (
+                    id SERIAL PRIMARY KEY,
+                    topic_id INTEGER,
+                    pdf_id INTEGER,
+                    goal_type VARCHAR(50) NOT NULL,
+                    target_value INTEGER NOT NULL,
+                    current_value INTEGER DEFAULT 0,
+                    target_date DATE,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create indexes
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_sessions_pdf_id ON sessions(pdf_id)",
+                # "CREATE INDEX IF NOT EXISTS idx_sessions_exercise_pdf_id ON sessions(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
+                "CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)",
+                "CREATE INDEX IF NOT EXISTS idx_page_times_session_id ON page_times(session_id)",
+                "CREATE INDEX IF NOT EXISTS idx_page_times_pdf_id ON page_times(pdf_id)",
+                # "CREATE INDEX IF NOT EXISTS idx_page_times_exercise_pdf_id ON page_times(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
+                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_pdf_id ON reading_metrics(pdf_id)",
+                # "CREATE INDEX IF NOT EXISTS idx_reading_metrics_exercise_pdf_id ON reading_metrics(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
+                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_topic_id ON reading_metrics(topic_id)",
+            ]
+            
+            for index_sql in indexes:
+                self.cursor.execute(index_sql)
+            
+            # Create views
+            self.cursor.execute("""
+                CREATE OR REPLACE VIEW daily_reading_stats AS
+                SELECT 
+                    DATE(start_time) as reading_date,
+                    COUNT(*) as sessions_count,
+                    SUM(total_time_seconds) as total_time_seconds,
+                    SUM(pages_visited) as total_pages_read,
+                    AVG(total_time_seconds::DECIMAL / NULLIF(pages_visited, 0)) as avg_seconds_per_page
+                FROM sessions 
+                WHERE end_time IS NOT NULL
+                GROUP BY DATE(start_time)
+                ORDER BY reading_date DESC
+            """)
+            
+            self.connection.commit()
+            logger.info("✅ Phase 2 tables created successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to create Phase 2 tables: {e}")
+            self.connection.rollback()
+            raise
+
+    def create_session(self, pdf_id=None, exercise_pdf_id=None, topic_id=None):
+        """Create a new reading session"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                self.cursor.execute("""
+                    INSERT INTO sessions (pdf_id, exercise_pdf_id, topic_id, start_time)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP) RETURNING id
+                """, (pdf_id, exercise_pdf_id, topic_id))
+                
+                session_id = self.cursor.fetchone()['id']
+                logger.info(f"Created session {session_id} for {'exercise' if exercise_pdf_id else 'main'} PDF {pdf_id or exercise_pdf_id}")
+                return session_id
+                
+        except Exception as e:
+            logger.error(f"Failed to create session: {e}")
+            raise
+
+    def end_session(self, session_id, total_time_seconds, active_time_seconds, idle_time_seconds, pages_visited):
+        """End a reading session with statistics"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                self.cursor.execute("""
+                    UPDATE sessions 
+                    SET end_time = CURRENT_TIMESTAMP,
+                        total_time_seconds = %s,
+                        active_time_seconds = %s,
+                        idle_time_seconds = %s,
+                        pages_visited = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING pdf_id, exercise_pdf_id, topic_id
+                """, (total_time_seconds, active_time_seconds, idle_time_seconds, pages_visited, session_id))
+                
+                result = self.cursor.fetchone()
+                if result:
+                    logger.info(f"Ended session {session_id}: {total_time_seconds}s total, {pages_visited} pages")
+                    return {
+                        'session_id': session_id,
+                        'total_time_seconds': total_time_seconds,
+                        'active_time_seconds': active_time_seconds,
+                        'idle_time_seconds': idle_time_seconds,
+                        'pages_visited': pages_visited,
+                        'pdf_id': result['pdf_id'],
+                        'exercise_pdf_id': result['exercise_pdf_id'],
+                        'topic_id': result['topic_id']
+                    }
+                else:
+                    logger.warning(f"Session {session_id} not found")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Failed to end session {session_id}: {e}")
+            raise
+
+    def save_page_time(self, session_id, pdf_id=None, exercise_pdf_id=None, page_number=1, duration_seconds=0):
+        """Save time spent on a specific page"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                self.cursor.execute("""
+                    INSERT INTO page_times (session_id, pdf_id, exercise_pdf_id, page_number, 
+                                          duration_seconds, end_time)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (session_id, pdf_id, exercise_pdf_id, page_number, duration_seconds))
+                
+                logger.debug(f"Saved page {page_number} time: {duration_seconds}s")
+                
+        except Exception as e:
+            logger.error(f"Failed to save page time: {e}")
+            raise
+
+    def update_reading_metrics(self, pdf_id=None, exercise_pdf_id=None, topic_id=None, 
+                             pages_per_minute=0, average_time_per_page_seconds=0, 
+                             pages_read=0, time_spent_seconds=0):
+        """Update or create reading speed metrics"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                # Check if metrics already exist
+                self.cursor.execute("""
+                    SELECT id, total_pages_read, total_time_spent_seconds 
+                    FROM reading_metrics 
+                    WHERE (pdf_id = %s OR pdf_id IS NULL) 
+                    AND (exercise_pdf_id = %s OR exercise_pdf_id IS NULL)
+                    AND (topic_id = %s OR topic_id IS NULL)
+                    AND pdf_id IS NOT DISTINCT FROM %s
+                    AND exercise_pdf_id IS NOT DISTINCT FROM %s
+                    AND topic_id IS NOT DISTINCT FROM %s
+                """, (pdf_id, exercise_pdf_id, topic_id, pdf_id, exercise_pdf_id, topic_id))
+                
+                existing = self.cursor.fetchone()
+                
+                if existing:
+                    # Update existing metrics
+                    new_total_pages = existing['total_pages_read'] + pages_read
+                    new_total_time = existing['total_time_spent_seconds'] + time_spent_seconds
+                    
+                    # Recalculate averages
+                    if new_total_pages > 0:
+                        new_avg_time_per_page = new_total_time / new_total_pages
+                        new_pages_per_minute = new_total_pages / (new_total_time / 60.0) if new_total_time > 0 else 0
+                    else:
+                        new_avg_time_per_page = average_time_per_page_seconds
+                        new_pages_per_minute = pages_per_minute
+                    
+                    self.cursor.execute("""
+                        UPDATE reading_metrics 
+                        SET pages_per_minute = %s,
+                            average_time_per_page_seconds = %s,
+                            total_pages_read = %s,
+                            total_time_spent_seconds = %s,
+                            last_calculated = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (new_pages_per_minute, new_avg_time_per_page, new_total_pages, 
+                          new_total_time, existing['id']))
+                else:
+                    # Create new metrics
+                    self.cursor.execute("""
+                        INSERT INTO reading_metrics (pdf_id, exercise_pdf_id, topic_id, pages_per_minute,
+                                                   average_time_per_page_seconds, total_pages_read,
+                                                   total_time_spent_seconds)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (pdf_id, exercise_pdf_id, topic_id, pages_per_minute, 
+                          average_time_per_page_seconds, pages_read, time_spent_seconds))
+                
+                logger.debug(f"Updated reading metrics for {'exercise' if exercise_pdf_id else 'main'} PDF")
+                
+        except Exception as e:
+            logger.error(f"Failed to update reading metrics: {e}")
+            raise
+
+    def get_reading_metrics(self, pdf_id=None, exercise_pdf_id=None, topic_id=None, user_wide=False):
+        """Get reading speed metrics"""
+        self.connect()
+        
+        try:
+            if user_wide:
+                # Get user-wide averages
+                self.cursor.execute("""
+                    SELECT 
+                        AVG(pages_per_minute) as pages_per_minute,
+                        AVG(average_time_per_page_seconds) as average_time_per_page_seconds,
+                        SUM(total_pages_read) as total_pages_read,
+                        SUM(total_time_spent_seconds) as total_time_spent_seconds
+                    FROM reading_metrics
+                    WHERE total_pages_read > 0
+                """)
+            else:
+                # Get specific metrics
+                self.cursor.execute("""
+                    SELECT pages_per_minute, average_time_per_page_seconds, 
+                           total_pages_read, total_time_spent_seconds, last_calculated
+                    FROM reading_metrics 
+                    WHERE (pdf_id = %s OR (%s IS NULL AND pdf_id IS NULL))
+                    AND (exercise_pdf_id = %s OR (%s IS NULL AND exercise_pdf_id IS NULL))
+                    AND (topic_id = %s OR (%s IS NULL AND topic_id IS NULL))
+                    ORDER BY last_calculated DESC
+                    LIMIT 1
+                """, (pdf_id, pdf_id, exercise_pdf_id, exercise_pdf_id, topic_id, topic_id))
+            
+            result = self.cursor.fetchone()
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Failed to get reading metrics: {e}")
+            return None
+
+    def get_daily_reading_stats(self, date):
+        """Get reading statistics for a specific date"""
+        self.connect()
+        
+        try:
+            self.cursor.execute("""
+                SELECT sessions_count, total_time_seconds, total_pages_read, avg_seconds_per_page
+                FROM daily_reading_stats
+                WHERE reading_date = %s
+            """, (date,))
+            
+            result = self.cursor.fetchone()
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Failed to get daily stats for {date}: {e}")
+            return None
+
+    def get_session_history(self, days=7, pdf_id=None, exercise_pdf_id=None):
+        """Get recent session history"""
+        self.connect()
+        
+        try:
+            base_query = """
+                SELECT s.id, s.start_time, s.end_time, s.total_time_seconds, 
+                       s.active_time_seconds, s.pages_visited,
+                       p.title as pdf_title, e.title as exercise_title,
+                       t.name as topic_name
+                FROM sessions s
+                LEFT JOIN pdfs p ON s.pdf_id = p.id
+                LEFT JOIN exercise_pdfs e ON s.exercise_pdf_id = e.id
+                LEFT JOIN topics t ON s.topic_id = t.id
+                WHERE s.start_time >= CURRENT_DATE - INTERVAL '%s days'
+                AND s.end_time IS NOT NULL
+            """
+            
+            params = [days]
+            
+            if pdf_id:
+                base_query += " AND s.pdf_id = %s"
+                params.append(pdf_id)
+            elif exercise_pdf_id:
+                base_query += " AND s.exercise_pdf_id = %s"
+                params.append(exercise_pdf_id)
+            
+            base_query += " ORDER BY s.start_time DESC"
+            
+            self.cursor.execute(base_query, params)
+            results = self.cursor.fetchall()
+            
+            return [dict(row) for row in results]
+            
+        except Exception as e:
+            logger.error(f"Failed to get session history: {e}")
+            return []
+
+    def get_reading_streaks(self, days=30):
+        """Get reading streak information"""
+        self.connect()
+        
+        try:
+            self.cursor.execute("""
+                WITH daily_sessions AS (
+                    SELECT DATE(start_time) as session_date,
+                           COUNT(*) as sessions_count,
+                           SUM(total_time_seconds) as daily_time
+                    FROM sessions
+                    WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+                    AND end_time IS NOT NULL
+                    GROUP BY DATE(start_time)
+                    ORDER BY session_date DESC
+                ),
+                streak_data AS (
+                    SELECT session_date, sessions_count, daily_time,
+                           session_date - (ROW_NUMBER() OVER (ORDER BY session_date))::INTEGER as streak_group
+                    FROM daily_sessions
+                )
+                SELECT COUNT(*) as current_streak_days,
+                       SUM(sessions_count) as streak_sessions,
+                       SUM(daily_time) as streak_total_time,
+                       MIN(session_date) as streak_start,
+                       MAX(session_date) as streak_end
+                FROM streak_data
+                WHERE streak_group = (
+                    SELECT streak_group FROM streak_data 
+                    WHERE session_date = (SELECT MAX(session_date) FROM daily_sessions)
+                )
+            """, (days,))
+            
+            result = self.cursor.fetchone()
+            return dict(result) if result else None
+            
+        except Exception as e:
+            logger.error(f"Failed to get reading streaks: {e}")
+            return None
+
+    def cleanup_old_sessions(self, days=90):
+        """Clean up old session data beyond retention period"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                # Clean up page times first (foreign key dependency)
+                self.cursor.execute("""
+                    DELETE FROM page_times 
+                    WHERE session_id IN (
+                        SELECT id FROM sessions 
+                        WHERE start_time < CURRENT_DATE - INTERVAL '%s days'
+                    )
+                """, (days,))
+                
+                page_times_deleted = self.cursor.rowcount
+                
+                # Clean up old sessions
+                self.cursor.execute("""
+                    DELETE FROM sessions 
+                    WHERE start_time < CURRENT_DATE - INTERVAL '%s days'
+                """, (days,))
+                
+                sessions_deleted = self.cursor.rowcount
+                
+                logger.info(f"Cleaned up {sessions_deleted} old sessions and {page_times_deleted} page time records")
+                return sessions_deleted
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup old sessions: {e}")
+            raise
+
+
+
     
     def __del__(self):
         """Ensure proper cleanup"""
