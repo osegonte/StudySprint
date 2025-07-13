@@ -167,7 +167,7 @@ class PDFViewer(QWidget):
             }
         """)
         
-    def load_pdf(self, file_path, pdf_id=None):
+    def load_pdf(self, file_path, pdf_id=None, is_exercise=False):
         try:
             print(f"Loading PDF: {file_path}")
             
@@ -184,6 +184,13 @@ class PDFViewer(QWidget):
             self.pdf_document = fitz.open(file_path)
             self.total_pages = len(self.pdf_document)
             self.pdf_id = pdf_id
+            self.is_exercise = is_exercise
+            
+            # Update title based on context
+            if is_exercise:
+                print(f"Loading exercise PDF: {file_path}")
+            else:
+                print(f"Loading main PDF: {file_path}")
             self.current_page = 0
             
             print(f"PDF loaded successfully: {self.total_pages} pages")
