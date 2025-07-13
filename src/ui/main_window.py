@@ -1,40 +1,41 @@
 import os
 import tempfile
+import logging
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                             QSplitter, QLabel, QPushButton, QFileDialog, 
-                            QMessageBox, QStatusBar, QMenuBar, QApplication)
+                            QMessageBox, QStatusBar, QMenuBar, QApplication,
+                            QInputDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtGui import QAction, QFont, QDragEnterEvent, QDropEvent, QKeySequence
 
 from database.db_manager import DatabaseManager
 from ui.pdf_viewer import PDFViewer
 from ui.topic_manager import TopicManager
+
+logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.db_manager = DatabaseManager()
         self.current_pdf_id = None
-        self.current_temp_file = None  # Track temporary file for cleanup
+        self.current_temp_file = None
+        self.temp_files_created = []
+        
+        # Timers
         self.page_save_timer = QTimer()
         self.cleanup_timer = QTimer()
+        
         self.setup_ui()
         self.setup_menu()
         self.setup_connections()
         self.apply_styles()
+        self.start_background_tasks()
         self.load_topics()
-        
-        # Auto-save page position every 5 seconds
-        self.page_save_timer.timeout.connect(self.save_current_page)
-        self.page_save_timer.start(5000)
-        
-        # Clean up temp files every 30 minutes
-        self.cleanup_timer.timeout.connect(self.cleanup_temp_files)
-        self.cleanup_timer.start(1800000)  # 30 minutes
         
     def setup_ui(self):
         """Set up the main user interface"""
-        self.setWindowTitle("StudySprint - Phase 1 Enhanced (Database Storage)")
+        self.setWindowTitle("StudySprint - Professional PDF Study Manager")
         self.setMinimumSize(1200, 800)
         self.resize(1400, 900)
         
@@ -85,59 +86,6 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.db_status_label)
         
         self.status_bar.showMessage("Ready - PDFs are stored securely in database")
-        
-    def apply_styles(self):
-        """Apply consistent styling"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #ffffff;
-                color: #000000;
-            }
-            QSplitter::handle {
-                background-color: #cccccc;
-                width: 3px;
-            }
-            QSplitter::handle:hover {
-                background-color: #007acc;
-            }
-            QStatusBar {
-                background-color: #f5f5f5;
-                border-top: 1px solid #cccccc;
-                color: #000000;
-                font-size: 12px;
-            }
-            QStatusBar QLabel {
-                color: #000000;
-                padding: 2px 8px;
-            }
-            QMenuBar {
-                background-color: #ffffff;
-                color: #000000;
-                border-bottom: 1px solid #cccccc;
-            }
-            QMenuBar::item {
-                background-color: transparent;
-                color: #000000;
-                padding: 6px 12px;
-            }
-            QMenuBar::item:selected {
-                background-color: #007acc;
-                color: white;
-            }
-            QMenu {
-                background-color: #ffffff;
-                color: #000000;
-                border: 1px solid #cccccc;
-            }
-            QMenu::item {
-                padding: 6px 12px;
-                color: #000000;
-            }
-            QMenu::item:selected {
-                background-color: #007acc;
-                color: white;
-            }
-        """)
         
     def setup_menu(self):
         """Set up the application menu"""
@@ -221,15 +169,25 @@ class MainWindow(QMainWindow):
         
     def setup_connections(self):
         """Set up signal connections"""
-        print("Setting up signal connections (database storage mode)...")
+        print("Setting up signal connections...")
         
-        # Connect the PDF selection signal (now only receives PDF ID)
+        # Connect the PDF selection signal
         self.topic_manager.pdf_selected.connect(self.load_pdf_from_database)
         print("Connected pdf_selected signal")
         
         # Connect page change signal
         self.pdf_viewer.page_changed.connect(self.on_page_changed)
         print("Connected page_changed signal")
+        
+    def start_background_tasks(self):
+        """Start background timers"""
+        # Auto-save page position every 5 seconds
+        self.page_save_timer.timeout.connect(self.save_current_page)
+        self.page_save_timer.start(5000)
+        
+        # Clean up temp files every 30 minutes
+        self.cleanup_timer.timeout.connect(self.cleanup_temp_files)
+        self.cleanup_timer.start(1800000)
         
     def load_topics(self):
         """Load topics from database"""
@@ -255,13 +213,12 @@ class MainWindow(QMainWindow):
                                
     def load_pdf_from_database(self, pdf_id):
         """Load PDF from database and display in viewer"""
-        print(f"\n=== MAIN WINDOW LOAD PDF FROM DATABASE ===")
-        print(f"Received signal to load PDF ID: {pdf_id}")
+        print(f"\n=== LOADING PDF FROM DATABASE ===")
+        print(f"PDF ID: {pdf_id}")
         
         try:
             # Save current position before switching
             if self.current_pdf_id:
-                print(f"Saving current position for PDF {self.current_pdf_id}")
                 self.save_current_page()
                 
             # Clean up previous temporary file
@@ -273,7 +230,7 @@ class MainWindow(QMainWindow):
                     pass
                     
             # Create temporary file from database
-            print(f"Creating temporary file from database...")
+            print(f"Creating temporary file...")
             temp_file_path = self.db_manager.create_temp_pdf_file(pdf_id)
             
             if not temp_file_path:
@@ -283,7 +240,6 @@ class MainWindow(QMainWindow):
             print(f"Temporary file created: {temp_file_path}")
             
             # Load PDF into viewer
-            print(f"Loading PDF into viewer...")
             if self.pdf_viewer.load_pdf(temp_file_path, pdf_id):
                 self.current_pdf_id = pdf_id
                 self.current_temp_file = temp_file_path
@@ -294,16 +250,15 @@ class MainWindow(QMainWindow):
                     self.current_file_label.setText(f"Loaded: {pdf_info['title']}")
                     
                     # Restore reading position
-                    print(f"Restoring reading position...")
                     self.restore_reading_position(pdf_id)
                     
                     self.status_bar.showMessage(f"Opened {pdf_info['title']} from database", 3000)
-                    print(f"PDF loaded successfully from database")
+                    print(f"PDF loaded successfully")
                 else:
                     self.current_file_label.setText(f"Loaded: PDF ID {pdf_id}")
                     
             else:
-                print(f"Failed to load PDF from temporary file")
+                print(f"Failed to load PDF")
                 self.current_pdf_id = None
                 self.current_temp_file = None
                 self.current_file_label.setText("Failed to load PDF")
@@ -315,12 +270,10 @@ class MainWindow(QMainWindow):
                     pass
                 
         except Exception as e:
-            print(f"Error in load_pdf_from_database: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error loading PDF: {e}")
             QMessageBox.critical(self, "Error", f"Failed to load PDF from database: {str(e)}")
         
-        print(f"=== END MAIN WINDOW LOAD PDF FROM DATABASE ===\n")
+        print(f"=== END LOAD PDF ===\n")
             
     def restore_reading_position(self, pdf_id):
         """Restore the last reading position for a PDF"""
@@ -385,7 +338,28 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No PDF", "No PDF is currently loaded")
             return
             
-        self.topic_manager.export_pdf(self.current_pdf_id)
+        try:
+            pdf_data = self.db_manager.get_pdf_data(self.current_pdf_id)
+            if not pdf_data:
+                QMessageBox.warning(self, "Export Error", "Could not retrieve PDF data")
+                return
+                
+            # Ask user where to save
+            suggested_name = pdf_data['file_name']
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Export PDF", suggested_name, "PDF Files (*.pdf)"
+            )
+            
+            if file_path:
+                with open(file_path, 'wb') as f:
+                    f.write(pdf_data['data'])
+                    
+                QMessageBox.information(self, "Export Complete", 
+                                      f"PDF exported successfully to:\n{file_path}")
+                self.status_bar.showMessage(f"Exported to {file_path}", 3000)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export PDF: {str(e)}")
         
     def cleanup_temp_files(self):
         """Clean up temporary files"""
@@ -421,6 +395,59 @@ class MainWindow(QMainWindow):
             "<p><b>Storage:</b> All PDFs are stored securely in PostgreSQL with SHA-256 verification.</p>"
             "<p>Built with PyQt6 and PostgreSQL</p>"
         )
+        
+    def apply_styles(self):
+        """Apply consistent styling"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #ffffff;
+                color: #000000;
+            }
+            QSplitter::handle {
+                background-color: #cccccc;
+                width: 3px;
+            }
+            QSplitter::handle:hover {
+                background-color: #007acc;
+            }
+            QStatusBar {
+                background-color: #f5f5f5;
+                border-top: 1px solid #cccccc;
+                color: #000000;
+                font-size: 12px;
+            }
+            QStatusBar QLabel {
+                color: #000000;
+                padding: 2px 8px;
+            }
+            QMenuBar {
+                background-color: #ffffff;
+                color: #000000;
+                border-bottom: 1px solid #cccccc;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                color: #000000;
+                padding: 6px 12px;
+            }
+            QMenuBar::item:selected {
+                background-color: #007acc;
+                color: white;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #cccccc;
+            }
+            QMenu::item {
+                padding: 6px 12px;
+                color: #000000;
+            }
+            QMenu::item:selected {
+                background-color: #007acc;
+                color: white;
+            }
+        """)
         
     def keyPressEvent(self, event):
         """Handle keyboard events"""

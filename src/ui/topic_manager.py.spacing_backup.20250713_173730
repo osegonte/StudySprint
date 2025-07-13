@@ -89,53 +89,33 @@ class TopicManager(QWidget):
         self.stats_label = QLabel("Loading...")
         self.stats_label.setFont(QFont("Arial", 10))
         
-        # Button layout - Two rows for better spacing
-        btn_container = QVBoxLayout()
+        # Button layout
+        btn_layout = QHBoxLayout()
         
-        # First row: Primary actions
-        btn_row1 = QHBoxLayout()
-        btn_row1.setSpacing(10)  # Add spacing between buttons
-        
-        self.add_topic_btn = QPushButton("📁 + Topic")
+        self.add_topic_btn = QPushButton("+ Topic")
         self.add_topic_btn.clicked.connect(self.add_topic)
-        self.add_topic_btn.setMinimumHeight(35)
         
-        self.add_pdf_btn = QPushButton("📄 + PDF")
+        self.add_pdf_btn = QPushButton("+ PDF")
         self.add_pdf_btn.clicked.connect(self.add_pdf)
         self.add_pdf_btn.setEnabled(False)
-        self.add_pdf_btn.setMinimumHeight(35)
         
         self.stats_btn = QPushButton("📊 Stats")
         self.stats_btn.clicked.connect(self.show_stats)
-        self.stats_btn.setMinimumHeight(35)
         
-        btn_row1.addWidget(self.add_topic_btn)
-        btn_row1.addWidget(self.add_pdf_btn)
-        btn_row1.addWidget(self.stats_btn)
-        
-        # Second row: Delete actions
-        btn_row2 = QHBoxLayout()
-        btn_row2.setSpacing(10)  # Add spacing between buttons
-        
+        btn_layout.addWidget(self.add_topic_btn)
+        btn_layout.addWidget(self.add_pdf_btn)
+        # NEW: Delete buttons
         self.delete_topic_btn = QPushButton("🗑️ Delete Topic")
         self.delete_topic_btn.clicked.connect(self.delete_topic)
         self.delete_topic_btn.setEnabled(False)
-        self.delete_topic_btn.setMinimumHeight(35)
         
         self.delete_pdf_btn = QPushButton("🗑️ Delete PDF")
         self.delete_pdf_btn.clicked.connect(self.delete_pdf)
         self.delete_pdf_btn.setEnabled(False)
-        self.delete_pdf_btn.setMinimumHeight(35)
         
-        # Add stretch to center the delete buttons
-        btn_row2.addWidget(self.delete_topic_btn)
-        btn_row2.addWidget(self.delete_pdf_btn)
-        btn_row2.addStretch()  # Push buttons to the left
-        
-        # Add rows to container
-        btn_container.addLayout(btn_row1)
-        btn_container.addLayout(btn_row2)
-        btn_container.setSpacing(8)  # Space between rows
+        btn_layout.addWidget(self.stats_btn)
+        btn_layout.addWidget(self.delete_topic_btn)
+        btn_layout.addWidget(self.delete_pdf_btn)
         
         # Topic tree
         self.topic_tree = QTreeWidget()
@@ -152,7 +132,7 @@ class TopicManager(QWidget):
         
         layout.addWidget(self.header)
         layout.addWidget(self.stats_label)
-        layout.addLayout(btn_container)
+        layout.addLayout(btn_layout)
         layout.addWidget(self.topic_tree)
         layout.addWidget(self.status_label)
         
@@ -166,47 +146,25 @@ class TopicManager(QWidget):
                 background-color: #ffffff;
                 color: #000000;
             }
-                    QPushButton {
-            background-color: #007acc;
-            color: white;
-            border: 1px solid #005a9e;
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-weight: bold;
-            font-size: 13px;
-            min-width: 100px;
-            min-height: 35px;
-            margin: 2px;
-        }
-        QPushButton:hover {
-            background-color: #005a9e;
-            transform: translateY(-1px);
-        }
-        QPushButton:pressed {
-            background-color: #004080;
-            transform: translateY(0px);
-        }
-        QPushButton:disabled {
-            background-color: #cccccc;
-            color: #666666;
-            border: 1px solid #999999;
-        }
-        QPushButton[text*="Delete"] {
+            QPushButton {
+                background-color: #007acc;
+                color: white;
+                border: 1px solid #005a9e;
+                padding: 10px 16px;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 13px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #005a9e;
+            }
+                    QPushButton[text*="Delete"] {
             background-color: #dc3545;
             border: 1px solid #c82333;
         }
         QPushButton[text*="Delete"]:hover {
             background-color: #c82333;
-        }
-        QPushButton[text*="Delete"]:pressed {
-            background-color: #bd2130;
-        }
-        QPushButton[text*="Stats"] {
-            background-color: #28a745;
-            border: 1px solid #1e7e34;
-        }
-        QPushButton[text*="Stats"]:hover {
-            background-color: #1e7e34;
         }
         QPushButton:disabled {
                 background-color: #cccccc;
