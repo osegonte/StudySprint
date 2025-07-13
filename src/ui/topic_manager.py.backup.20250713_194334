@@ -985,17 +985,13 @@ class TopicManager(QWidget):
         # Exercise type selection
         layout.addWidget(QLabel("Exercise Type:"))
         type_combo = QComboBox()
-        exercise_types = [
+        type_combo.addItems([
             ("exercises", "🏋️ Exercises"),
             ("solutions", "✅ Solutions"),
             ("practice", "📝 Practice Problems"),
             ("homework", "📚 Homework"),
             ("general", "📄 General")
-        ]
-        
-        # Add items properly - display text with userData
-        for value, display_text in exercise_types:
-            type_combo.addItem(display_text, value)
+        ])
         type_combo.setCurrentIndex(0)
         layout.addWidget(type_combo)
         
@@ -1048,7 +1044,7 @@ class TopicManager(QWidget):
             
             try:
                 # Add exercise PDF to database
-                exercise_type = type_combo.currentData()
+                exercise_type = type_combo.currentData() or type_combo.currentText().split()[1].lower()
                 exercise_id = self.db_manager.add_exercise_pdf(
                     parent_pdf_id=parent_pdf_id,
                     title=title_input.text().strip(),
