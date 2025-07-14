@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                             QInputDialog, QTabWidget)
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QFont, QDragEnterEvent, QDropEvent, QKeySequence
-
+from ui.goals_widget import GoalsMainWidget
 from database.db_manager import DatabaseManager
 from ui.pdf_viewer import PDFViewer
 from ui.topic_manager import TopicManager
@@ -41,8 +41,8 @@ class MainWindow(QMainWindow):
         self.load_topics()
         
     def setup_ui(self):
-        """Set up the main user interface with Phase 2 enhancements"""
-        self.setWindowTitle("StudySprint Phase 2 - Professional PDF Study Manager with Timer")
+        """Set up the main user interface with Phase 2.1 enhancements"""
+        self.setWindowTitle("StudySprint Phase 2.1 - Professional PDF Study Manager with Goals & Timer")
         self.setMinimumSize(1400, 900)
         self.resize(1600, 1000)
         
@@ -113,6 +113,9 @@ class MainWindow(QMainWindow):
         
         self.status_bar.showMessage("Ready - Phase 2 with Timer Integration Active")
         
+        self.goals_widget = GoalsMainWidget(self.db_manager)
+        self.left_sidebar.addTab(self.goals_widget, "🎯 Goals")
+
     def setup_menu(self):
         """Set up the application menu with Phase 2 additions"""
         menubar = self.menuBar()
@@ -234,6 +237,11 @@ class MainWindow(QMainWindow):
         shortcuts_action.triggered.connect(self.show_shortcuts)
         help_menu.addAction(shortcuts_action)
         
+        goals_action = QAction('Show &Goals', self)
+        goals_action.setShortcut('Ctrl+4')
+        goals_action.triggered.connect(lambda: self.left_sidebar.setCurrentIndex(3))
+        view_menu.addAction(goals_action)
+
     def setup_connections(self):
         """Set up signal connections including Phase 2 timer connections"""
         print("Setting up Phase 2 signal connections...")
@@ -252,7 +260,8 @@ class MainWindow(QMainWindow):
         self.session_timer.session_ended.connect(self.on_session_ended)
         self.session_timer.page_changed.connect(self.on_timer_page_changed)
         print("Connected session timer signals")
-        
+        print("Connecting goals system...")
+
     def start_background_tasks(self):
         """Start background timers including Phase 2 enhancements"""
         # Auto-save page position every 5 seconds
@@ -529,7 +538,7 @@ class MainWindow(QMainWindow):
         print(f"Session {session_id} started successfully")
     
     def on_session_ended(self, session_id, stats):
-        """Handle session ended signal"""
+        """Handle session ended with comprehensive cleanup and goals update"""
         self.current_session_id = None
         self.session_status_label.setText("No active session")
         
@@ -544,6 +553,33 @@ class MainWindow(QMainWindow):
                 f"Session ended: {minutes}m {seconds}s, {pages_visited} pages", 
                 5000
             )
+            
+            # Update goals progress (Phase 2.1)
+            try:
+                if hasattr(self, 'goals_widget') and self.current_pdf_id:
+                    # Get topic ID from current PDF
+                    if str(self.current_pdf_id).startswith("exercise_"):
+                        exercise_id = int(str(self.current_pdf_id).replace("exercise_", ""))
+                        exercise_info = self.db_manager.get_exercise_pdf_by_id(exercise_id)
+                        if exercise_info:
+                            parent_info = self.db_manager.get_pdf_by_id(exercise_info['parent_pdf_id'])
+                            topic_id = parent_info.get('topic_id') if parent_info else None
+                        else:
+                            topic_id = None
+                    else:
+                        pdf_info = self.db_manager.get_pdf_by_id(self.current_pdf_id)
+                        topic_id = pdf_info.get('topic_id') if pdf_info else None
+                    
+                    if topic_id:
+                        self.goals_widget.update_after_session(
+                            topic_id=topic_id,
+                            pages_read=pages_visited,
+                            time_spent_seconds=total_time
+                        )
+                        logger.info(f"Updated goals for topic {topic_id}")
+                        
+            except Exception as e:
+                logger.error(f"Error updating goals after session: {e}")
         
         print(f"Session {session_id} ended")
     
@@ -674,12 +710,22 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error cleaning up temp files: {e}")
         
+    
     def show_about(self):
-        """Enhanced about dialog with Phase 2 features"""
+        """Enhanced about dialog with Phase 2.1 features"""
         QMessageBox.about(
-            self, "About StudySprint Phase 2",
-            "<h3>StudySprint v2.0.0 - Phase 2: Timer Integration</h3>"
-            "<p>A powerful PDF study management application with advanced session tracking and reading intelligence.</p>"
+            self, "About StudySprint Phase 2.1",
+            "<h3>StudySprint v2.1.0 - Phase 2.1: Goal Setting & Progress Tracking</h3>"
+            "<p>A powerful PDF study management application with advanced session tracking, reading intelligence, and comprehensive goal setting.</p>"
+            "<p><b>Phase 2.1 Features (NEW!):</b></p>"
+            "<ul>"
+            "<li>🎯 <b>Study Goals</b> - Set and track finish-by-date, daily time, and daily pages goals</li>"
+            "<li>📊 <b>Progress Tracking</b> - Automatic progress updates after each study session</li>"
+            "<li>📈 <b>Smart Adjustments</b> - Dynamic daily plan adjustments when behind schedule</li>"
+            "<li>📅 <b>Daily Progress</b> - See today's progress across all goals at a glance</li>"
+            "<li>💡 <b>Goal Analytics</b> - Detailed insights, trends, and success metrics</li>"
+            "<li>🔥 <b>Streak Tracking</b> - Monitor consistency and reading habits</li>"
+            "</ul>"
             "<p><b>Phase 2 Features:</b></p>"
             "<ul>"
             "<li>⏱️ <b>Session Timer</b> - Automatic session tracking with start/end times</li>"
@@ -698,29 +744,30 @@ class MainWindow(QMainWindow):
             "<li>✅ Full PDF viewing with zoom and navigation</li>"
             "<li>✅ Topic-based organization</li>"
             "</ul>"
-            "<p><b>How to Use Phase 2:</b></p>"
+            "<p><b>How to Use Goals (Phase 2.1):</b></p>"
             "<ol>"
-            "<li>Open any PDF - a session automatically starts</li>"
-            "<li>Switch to the Timer tab to see real-time statistics</li>"
-            "<li>Check the Dashboard tab for overall progress</li>"
-            "<li>Session ends when you close the PDF or go idle</li>"
-            "<li>View Session → Statistics for current session details</li>"
+            "<li>Click the Goals tab to access goal management</li>"
+            "<li>Create goals: finish-by-date, daily time, or daily pages</li>"
+            "<li>Study as usual - progress updates automatically</li>"
+            "<li>Check Today's Progress to see how you're doing</li>"
+            "<li>View Analytics for detailed insights and trends</li>"
             "</ol>"
             "<p><b>Keyboard Shortcuts:</b></p>"
             "<ul>"
             "<li><b>Ctrl+1:</b> Show Library tab</li>"
             "<li><b>Ctrl+2:</b> Show Timer tab</li>"
             "<li><b>Ctrl+3:</b> Show Dashboard tab</li>"
+            "<li><b>Ctrl+4:</b> Show Goals tab (NEW!)</li>"
             "<li><b>Ctrl+P:</b> Pause/Resume session</li>"
             "<li><b>Ctrl+Shift+E:</b> End current session</li>"
             "</ul>"
-            "<p>Built with PyQt6, PostgreSQL, and advanced timing algorithms</p>"
+            "<p>Built with PyQt6, PostgreSQL, and advanced analytics algorithms</p>"
         )
     
     def show_shortcuts(self):
         """Show keyboard shortcuts dialog"""
         shortcuts_text = """
-        <h3>⌨️ StudySprint Phase 2 Keyboard Shortcuts</h3>
+        <h3>⌨️ StudySprint Phase 2.1 Keyboard Shortcuts</h3>
         
         <h4>📁 File Operations:</h4>
         <ul>
@@ -737,6 +784,7 @@ class MainWindow(QMainWindow):
         <li><b>Ctrl+1:</b> Show Library tab</li>
         <li><b>Ctrl+2:</b> Show Timer tab</li>
         <li><b>Ctrl+3:</b> Show Dashboard tab</li>
+        <li><b>Ctrl+4:</b> Show Goals tab (NEW!)</li>
         </ul>
         
         <h4>📖 Navigation:</h4>
@@ -752,11 +800,18 @@ class MainWindow(QMainWindow):
         <li><b>Ctrl+Shift+E:</b> End current session</li>
         </ul>
         
-        <p><i>Sessions start automatically when you open a PDF and end when you close it or go idle for 2+ minutes.</i></p>
+        <h4>🎯 Goals (Phase 2.1):</h4>
+        <ul>
+        <li><b>Ctrl+4:</b> Open Goals tab</li>
+        <li>Goals update automatically after each study session</li>
+        <li>Check Today's Progress for daily goal status</li>
+        </ul>
+        
+        <p><i>Sessions start automatically when you open a PDF and end when you close it or go idle for 2+ minutes. Goals track your progress automatically!</i></p>
         """
         
         QMessageBox.information(self, "Keyboard Shortcuts", shortcuts_text)
-        
+
     def apply_styles(self):
         """Apply consistent styling with Phase 2 enhancements"""
         self.setStyleSheet("""
@@ -844,6 +899,8 @@ class MainWindow(QMainWindow):
                 self.left_sidebar.setCurrentIndex(1)  # Timer
             elif event.key() == Qt.Key.Key_3:
                 self.left_sidebar.setCurrentIndex(2)  # Dashboard
+            elif event.key() == Qt.Key.Key_4:
+                self.left_sidebar.setCurrentIndex(3)  # Goals
             elif event.key() == Qt.Key.Key_P:
                 self.toggle_session()
         elif event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
@@ -851,6 +908,7 @@ class MainWindow(QMainWindow):
                 self.end_current_session()
         else:
             super().keyPressEvent(event)
+
             
     def closeEvent(self, event):
         """Handle application close with Phase 2 session cleanup"""
@@ -890,3 +948,69 @@ class MainWindow(QMainWindow):
             
         self.status_bar.showMessage("Shutting down Phase 2...", 1000)
         event.accept()
+    
+    def show_session_summary_with_goals(self, session_stats):
+        """Show session summary with goals progress update"""
+        if not session_stats:
+            return
+        
+        total_time = session_stats.get('total_time_seconds', 0)
+        pages_visited = session_stats.get('pages_visited', 0)
+        active_time = session_stats.get('active_time_seconds', 0)
+        
+        minutes = total_time // 60
+        seconds = total_time % 60
+        efficiency = (active_time / total_time * 100) if total_time > 0 else 0
+        
+        # Get updated goal status if applicable
+        goals_update = ""
+        try:
+            if hasattr(self, 'goals_widget'):
+                today_progress = self.goals_widget.goals_manager.get_today_progress()
+                completed_goals = len([g for g in today_progress['daily_goals'] if g.get('target_met_today')])
+                total_daily_goals = len(today_progress['daily_goals'])
+                
+                if total_daily_goals > 0:
+                    goals_update = f"\n\n🎯 Goals Progress:\n{completed_goals}/{total_daily_goals} daily goals completed today"
+        except:
+            pass
+        
+        summary_text = f"""
+        <h3>📖 Study Session Complete</h3>
+        
+        <h4>⏱️ Session Statistics:</h4>
+        <ul>
+        <li><b>Total Time:</b> {minutes:02d}:{seconds:02d}</li>
+        <li><b>Active Time:</b> {active_time // 60}:{active_time % 60:02d}</li>
+        <li><b>Pages Read:</b> {pages_visited}</li>
+        <li><b>Efficiency:</b> {efficiency:.1f}%</li>
+        </ul>
+        
+        {goals_update}
+        
+        <p><i>Great work! Your progress has been automatically saved and goals updated.</i></p>
+        """
+        
+        QMessageBox.information(self, "Session Summary", summary_text)
+    def __init__(self):
+        super().__init__()
+        self.db_manager = DatabaseManager()
+        self.current_pdf_id = None
+        self.current_temp_file = None
+        self.temp_files_created = []
+        
+        # Phase 2: Timer and Intelligence
+        self.session_timer = SessionTimer(self.db_manager)
+        self.reading_intelligence = ReadingIntelligence(self.db_manager)
+        self.current_session_id = None
+        
+        # Timers
+        self.page_save_timer = QTimer()
+        self.cleanup_timer = QTimer()
+        
+        self.setup_ui()
+        self.setup_menu()
+        self.setup_connections()
+        self.apply_styles()
+        self.start_background_tasks()
+        self.load_topics()

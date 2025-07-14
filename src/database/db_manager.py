@@ -7,6 +7,7 @@ import hashlib
 import time
 import logging
 from contextlib import contextmanager
+from datetime import datetime, date, timedelta
 
 load_dotenv()
 
@@ -2137,3 +2138,589 @@ def _get_health_status(self, score):
         return 'poor'
     else:
         return 'critical'
+def create_goals_tables(self):
+    """Create goals system tables if they don't exist"""
+    try:
+        logger.info("Creating goals system tables...")
+        
+        # Goals table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS goals (
+                id SERIAL PRIMARY KEY,
+                topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                target_type TEXT CHECK (target_type IN ('finish_by_date', 'daily_time', 'daily_pages')),
+                target_value INTEGER NOT NULL,
+                deadline DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                is_completed BOOLEAN DEFAULT FALSE,
+                completion_date TIMESTAMP,
+                
+                CONSTRAINT valid_deadline CHECK (
+                    (target_type = 'finish_by_date' AND deadline IS NOT NULL) OR
+                    (target_type != 'finish_by_date' AND deadline IS NULL)
+                ),
+                CONSTRAINT positive_target_value CHECK (target_value > 0)
+            )
+        """)
+        
+        # Goal progress table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS goal_progress (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                pages_read INTEGER DEFAULT 0,
+                time_spent_minutes INTEGER DEFAULT 0,
+                sessions_count INTEGER DEFAULT 0,
+                target_met BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                UNIQUE (goal_id, date),
+                
+                CONSTRAINT non_negative_pages CHECK (pages_read >= 0),
+                CONSTRAINT non_negative_time CHECK (time_spent_minutes >= 0),
+                CONSTRAINT non_negative_sessions CHECK (sessions_count >= 0)
+            )
+        """)
+        
+        # Goal adjustments table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS goal_adjustments (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+                adjustment_date DATE NOT NULL,
+                old_daily_target INTEGER,
+                new_daily_target INTEGER,
+                reason TEXT,
+                pages_behind INTEGER DEFAULT 0,
+                days_remaining INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create indexes
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_goals_topic_id ON goals(topic_id)",
+            "CREATE INDEX IF NOT EXISTS idx_goals_active ON goals(is_active) WHERE is_active = TRUE",
+            "CREATE INDEX IF NOT EXISTS idx_goals_target_type ON goals(target_type)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_id ON goal_progress(goal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_progress_date ON goal_progress(date)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_date ON goal_progress(goal_id, date)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_adjustments_goal_id ON goal_adjustments(goal_id)"
+        ]
+        
+        for index_sql in indexes:
+            try:
+                self.cursor.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Could not create index: {e}")
+        
+        # Create useful views
+        self.cursor.execute("""
+            CREATE OR REPLACE VIEW goal_summary AS
+            SELECT 
+                g.id,
+                g.target_type,
+                g.target_value,
+                g.deadline,
+                g.is_active,
+                g.is_completed,
+                t.name as topic_name,
+                COALESCE(SUM(gp.pages_read), 0) as total_pages_read,
+                COALESCE(SUM(gp.time_spent_minutes), 0) as total_time_spent,
+                COALESCE(COUNT(gp.date), 0) as days_tracked
+            FROM goals g
+            LEFT JOIN topics t ON g.topic_id = t.id
+            LEFT JOIN goal_progress gp ON g.id = gp.goal_id
+            GROUP BY g.id, g.target_type, g.target_value, g.deadline, g.is_active, g.is_completed, t.name
+        """)
+        
+        # Daily goal status view
+        self.cursor.execute("""
+            CREATE OR REPLACE VIEW daily_goal_status AS
+            SELECT 
+                g.id as goal_id,
+                g.target_type,
+                g.target_value,
+                t.name as topic_name,
+                CURRENT_DATE as today,
+                COALESCE(gp.pages_read, 0) as pages_read_today,
+                COALESCE(gp.time_spent_minutes, 0) as time_spent_today,
+                COALESCE(gp.sessions_count, 0) as sessions_today,
+                COALESCE(gp.target_met, FALSE) as target_met_today,
+                CASE 
+                    WHEN g.target_type = 'daily_pages' THEN g.target_value - COALESCE(gp.pages_read, 0)
+                    WHEN g.target_type = 'daily_time' THEN g.target_value - COALESCE(gp.time_spent_minutes, 0)
+                    ELSE 0
+                END as remaining_today
+            FROM goals g
+            LEFT JOIN topics t ON g.topic_id = t.id
+            LEFT JOIN goal_progress gp ON g.id = gp.goal_id AND gp.date = CURRENT_DATE
+            WHERE g.is_active = TRUE AND g.is_completed = FALSE
+        """)
+        
+        self.connection.commit()
+        logger.info("✅ Goals system tables created successfully")
+        
+    except Exception as e:
+        logger.error(f"Error creating goals tables: {e}")
+        raise
+
+def update_goal_progress_after_session(self, topic_id, pages_read, time_spent_minutes, session_date=None):
+    """Update goal progress after a study session"""
+    try:
+        if session_date is None:
+            session_date = datetime.now().date()
+        
+        # Get all active goals for this topic
+        self.cursor.execute("""
+            SELECT id, target_type, target_value 
+            FROM goals 
+            WHERE topic_id = %s AND is_active = TRUE AND is_completed = FALSE
+        """, (topic_id,))
+        
+        goals = self.cursor.fetchall()
+        
+        for goal in goals:
+            goal_id = goal['id']
+            target_type = goal['target_type']
+            target_value = goal['target_value']
+            
+            # Insert or update today's progress
+            self.cursor.execute("""
+                INSERT INTO goal_progress (goal_id, date, pages_read, time_spent_minutes, sessions_count)
+                VALUES (%s, %s, %s, %s, 1)
+                ON CONFLICT (goal_id, date) 
+                DO UPDATE SET
+                    pages_read = goal_progress.pages_read + EXCLUDED.pages_read,
+                    time_spent_minutes = goal_progress.time_spent_minutes + EXCLUDED.time_spent_minutes,
+                    sessions_count = goal_progress.sessions_count + EXCLUDED.sessions_count,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (goal_id, session_date, pages_read, time_spent_minutes))
+            
+            # Update target_met status
+            self.cursor.execute("""
+                UPDATE goal_progress SET
+                    target_met = CASE 
+                        WHEN %s = 'daily_pages' THEN pages_read >= %s
+                        WHEN %s = 'daily_time' THEN time_spent_minutes >= %s
+                        ELSE target_met
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE goal_id = %s AND date = %s
+            """, (target_type, target_value, target_type, target_value, goal_id, session_date))
+        
+        self.connection.commit()
+        logger.info(f"Updated goal progress for topic {topic_id}: {pages_read} pages, {time_spent_minutes}m")
+        
+    except Exception as e:
+        logger.error(f"Error updating goal progress: {e}")
+        raise
+
+def get_active_goals(self, topic_id=None):
+    """Get all active goals, optionally filtered by topic"""
+    try:
+        base_query = """
+            SELECT g.*, t.name as topic_name,
+                   COALESCE(SUM(gp.pages_read), 0) as total_pages_read,
+                   COALESCE(SUM(gp.time_spent_minutes), 0) as total_time_spent,
+                   COALESCE(COUNT(gp.date), 0) as days_tracked
+            FROM goals g
+            LEFT JOIN topics t ON g.topic_id = t.id
+            LEFT JOIN goal_progress gp ON g.id = gp.goal_id
+            WHERE g.is_active = TRUE AND g.is_completed = FALSE
+        """
+        
+        params = []
+        if topic_id:
+            base_query += " AND g.topic_id = %s"
+            params.append(topic_id)
+        
+        base_query += " GROUP BY g.id, t.name ORDER BY g.created_at DESC"
+        
+        self.cursor.execute(base_query, params)
+        return [dict(row) for row in self.cursor.fetchall()]
+        
+    except Exception as e:
+        logger.error(f"Error getting active goals: {e}")
+        return []
+
+def get_today_goal_progress(self, topic_id=None):
+    """Get today's goal progress"""
+    try:
+        base_query = """
+            SELECT * FROM daily_goal_status
+        """
+        
+        params = []
+        if topic_id:
+            base_query += " WHERE goal_id IN (SELECT id FROM goals WHERE topic_id = %s)"
+            params.append(topic_id)
+        
+        self.cursor.execute(base_query, params)
+        return [dict(row) for row in self.cursor.fetchall()]
+        
+    except Exception as e:
+        logger.error(f"Error getting today's goal progress: {e}")
+        return []
+
+def get_goal_analytics(self, goal_id, days=30):
+    """Get comprehensive analytics for a specific goal"""
+    try:
+        # Get goal progress over time
+        self.cursor.execute("""
+            SELECT date, pages_read, time_spent_minutes, target_met, sessions_count
+            FROM goal_progress
+            WHERE goal_id = %s AND date >= CURRENT_DATE - INTERVAL '%s days'
+            ORDER BY date DESC
+        """, (goal_id, days))
+        
+        progress_data = [dict(row) for row in self.cursor.fetchall()]
+        
+        # Get goal adjustments
+        self.cursor.execute("""
+            SELECT adjustment_date, old_daily_target, new_daily_target, 
+                   reason, pages_behind, days_remaining
+            FROM goal_adjustments
+            WHERE goal_id = %s
+            ORDER BY adjustment_date DESC
+        """, (goal_id,))
+        
+        adjustments = [dict(row) for row in self.cursor.fetchall()]
+        
+        return {
+            'goal_id': goal_id,
+            'progress_data': progress_data,
+            'adjustments': adjustments
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting goal analytics: {e}")
+        return {}
+
+def calculate_pages_behind_schedule(self, goal_id):
+    """Calculate how many pages behind schedule for deadline goals"""
+    try:
+        # Get goal details
+        self.cursor.execute("""
+            SELECT g.*, t.name as topic_name
+            FROM goals g
+            LEFT JOIN topics t ON g.topic_id = t.id
+            WHERE g.id = %s AND g.target_type = 'finish_by_date'
+        """, (goal_id,))
+        
+        goal = self.cursor.fetchone()
+        if not goal:
+            return 0
+        
+        # Calculate days elapsed since goal creation
+        days_elapsed = (datetime.now().date() - goal['created_at'].date()).days + 1
+        
+        # Get total pages needed for topic
+        self.cursor.execute("""
+            SELECT COALESCE(SUM(total_pages - GREATEST(current_page - 1, 0)), 0) as total_pages_needed
+            FROM pdfs 
+            WHERE topic_id = %s
+        """, (goal['topic_id'],))
+        
+        total_pages_needed = self.cursor.fetchone()['total_pages_needed']
+        
+        # Get actual pages read
+        self.cursor.execute("""
+            SELECT COALESCE(SUM(pages_read), 0) as actual_pages
+            FROM goal_progress
+            WHERE goal_id = %s
+        """, (goal_id,))
+        
+        actual_pages = self.cursor.fetchone()['actual_pages']
+        
+        # Calculate daily target and expected progress
+        total_days = (goal['deadline'] - goal['created_at'].date()).days + 1
+        daily_target = total_pages_needed / total_days if total_days > 0 else 0
+        expected_progress = daily_target * days_elapsed
+        
+        return max(0, int(expected_progress - actual_pages))
+        
+    except Exception as e:
+        logger.error(f"Error calculating pages behind: {e}")
+        return 0
+
+def create_goal(self, topic_id, target_type, target_value, deadline=None):
+    """Create a new study goal"""
+    try:
+        with self.transaction():
+            self.cursor.execute("""
+                INSERT INTO goals (topic_id, target_type, target_value, deadline)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (topic_id, target_type, target_value, deadline))
+            
+            goal_id = self.cursor.fetchone()['id']
+            logger.info(f"Created {target_type} goal for topic {topic_id}: {target_value}")
+            return goal_id
+            
+    except Exception as e:
+        logger.error(f"Error creating goal: {e}")
+        return None
+
+def update_goal(self, goal_id, **kwargs):
+    """Update goal properties"""
+    try:
+        if not kwargs:
+            return False
+        
+        # Build update query
+        set_clauses = []
+        params = []
+        
+        for key, value in kwargs.items():
+            if key in ['target_value', 'deadline', 'is_active', 'is_completed']:
+                set_clauses.append(f"{key} = %s")
+                params.append(value)
+        
+        if not set_clauses:
+            return False
+        
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(goal_id)
+        
+        with self.transaction():
+            query = f"UPDATE goals SET {', '.join(set_clauses)} WHERE id = %s"
+            self.cursor.execute(query, params)
+            
+            return self.cursor.rowcount > 0
+            
+    except Exception as e:
+        logger.error(f"Error updating goal {goal_id}: {e}")
+        return False
+
+def deactivate_goal(self, goal_id):
+    """Deactivate a goal"""
+    try:
+        return self.update_goal(goal_id, is_active=False)
+    except Exception as e:
+        logger.error(f"Error deactivating goal {goal_id}: {e}")
+        return False
+
+def complete_goal(self, goal_id):
+    """Mark a goal as completed"""
+    try:
+        return self.update_goal(goal_id, is_completed=True, completion_date=datetime.now())
+    except Exception as e:
+        logger.error(f"Error completing goal {goal_id}: {e}")
+        return False
+
+def delete_goal(self, goal_id):
+    """Delete a goal and all its progress data"""
+    try:
+        with self.transaction():
+            # Delete progress data first (foreign key dependency)
+            self.cursor.execute("DELETE FROM goal_progress WHERE goal_id = %s", (goal_id,))
+            progress_deleted = self.cursor.rowcount
+            
+            # Delete adjustments
+            self.cursor.execute("DELETE FROM goal_adjustments WHERE goal_id = %s", (goal_id,))
+            adjustments_deleted = self.cursor.rowcount
+            
+            # Delete the goal
+            self.cursor.execute("DELETE FROM goals WHERE id = %s", (goal_id,))
+            goal_deleted = self.cursor.rowcount > 0
+            
+            if goal_deleted:
+                logger.info(f"Deleted goal {goal_id} with {progress_deleted} progress records and {adjustments_deleted} adjustments")
+                return True
+            else:
+                logger.warning(f"Goal {goal_id} not found for deletion")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error deleting goal {goal_id}: {e}")
+        raise
+
+def get_goal_summary_stats(self):
+    """Get summary statistics for all goals"""
+    try:
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as total_goals,
+                COUNT(CASE WHEN is_active = TRUE AND is_completed = FALSE THEN 1 END) as active_goals,
+                COUNT(CASE WHEN is_completed = TRUE THEN 1 END) as completed_goals,
+                COUNT(CASE WHEN target_type = 'finish_by_date' THEN 1 END) as deadline_goals,
+                COUNT(CASE WHEN target_type = 'daily_time' THEN 1 END) as daily_time_goals,
+                COUNT(CASE WHEN target_type = 'daily_pages' THEN 1 END) as daily_page_goals
+            FROM goals
+        """)
+        
+        stats = self.cursor.fetchone()
+        
+        # Get today's completion rate
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as daily_goals_today,
+                COUNT(CASE WHEN target_met = TRUE THEN 1 END) as completed_today
+            FROM goal_progress gp
+            JOIN goals g ON gp.goal_id = g.id
+            WHERE gp.date = CURRENT_DATE 
+            AND g.target_type IN ('daily_time', 'daily_pages')
+            AND g.is_active = TRUE
+        """)
+        
+        today_stats = self.cursor.fetchone()
+        
+        return {
+            **dict(stats),
+            **dict(today_stats),
+            'completion_rate_today': (
+                today_stats['completed_today'] / today_stats['daily_goals_today'] * 100
+                if today_stats['daily_goals_today'] > 0 else 0
+            )
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting goal summary stats: {e}")
+        return {}
+
+def cleanup_old_goal_data(self, days=90):
+    """Clean up old goal progress data"""
+    try:
+        with self.transaction():
+            # Clean up old progress records
+            self.cursor.execute("""
+                DELETE FROM goal_progress 
+                WHERE date < CURRENT_DATE - INTERVAL '%s days'
+                AND goal_id IN (
+                    SELECT id FROM goals WHERE is_completed = TRUE OR is_active = FALSE
+                )
+            """, (days,))
+            
+            progress_deleted = self.cursor.rowcount
+            
+            # Clean up old adjustments
+            self.cursor.execute("""
+                DELETE FROM goal_adjustments 
+                WHERE adjustment_date < CURRENT_DATE - INTERVAL '%s days'
+                AND goal_id IN (
+                    SELECT id FROM goals WHERE is_completed = TRUE OR is_active = FALSE
+                )
+            """, (days,))
+            
+            adjustments_deleted = self.cursor.rowcount
+            
+            logger.info(f"Cleaned up {progress_deleted} old progress records and {adjustments_deleted} old adjustments")
+            return progress_deleted + adjustments_deleted
+            
+    except Exception as e:
+        logger.error(f"Error cleaning up old goal data: {e}")
+        raise
+
+def get_goals_health_report(self):
+    """Generate goals system health report"""
+    try:
+        health_report = {}
+        
+        # Basic counts
+        stats = self.get_goal_summary_stats()
+        health_report['goal_counts'] = stats
+        
+        # Data integrity checks
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as total_progress_records,
+                COUNT(CASE WHEN pages_read < 0 THEN 1 END) as negative_pages,
+                COUNT(CASE WHEN time_spent_minutes < 0 THEN 1 END) as negative_time,
+                COUNT(CASE WHEN sessions_count < 0 THEN 1 END) as negative_sessions
+            FROM goal_progress
+        """)
+        
+        integrity_stats = self.cursor.fetchone()
+        health_report['data_integrity'] = dict(integrity_stats)
+        
+        # Orphaned records check
+        self.cursor.execute("""
+            SELECT COUNT(*) as orphaned_progress
+            FROM goal_progress gp
+            LEFT JOIN goals g ON gp.goal_id = g.id
+            WHERE g.id IS NULL
+        """)
+        
+        orphaned = self.cursor.fetchone()['orphaned_progress']
+        health_report['orphaned_records'] = orphaned
+        
+        # Performance metrics
+        self.cursor.execute("""
+            SELECT 
+                AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as avg_goal_lifetime_days,
+                COUNT(CASE WHEN deadline < CURRENT_DATE AND is_completed = FALSE THEN 1 END) as overdue_goals
+            FROM goals
+            WHERE target_type = 'finish_by_date'
+        """)
+        
+        performance = self.cursor.fetchone()
+        health_report['performance_metrics'] = dict(performance)
+        
+        # Calculate overall health score
+        health_score = self._calculate_goals_health_score(health_report)
+        health_report['overall_health_score'] = health_score
+        health_report['health_status'] = self._get_goals_health_status(health_score)
+        
+        return health_report
+        
+    except Exception as e:
+        logger.error(f"Error generating goals health report: {e}")
+        return {'error': str(e), 'health_status': 'error'}
+
+def _calculate_goals_health_score(self, report):
+    """Calculate overall goals system health score (0-100)"""
+    score = 100
+    
+    # Deduct points for data integrity issues
+    integrity = report.get('data_integrity', {})
+    total_records = integrity.get('total_progress_records', 1)
+    
+    if total_records > 0:
+        negative_ratio = (
+            integrity.get('negative_pages', 0) + 
+            integrity.get('negative_time', 0) + 
+            integrity.get('negative_sessions', 0)
+        ) / (total_records * 3)  # 3 fields to check
+        
+        score -= negative_ratio * 30  # Up to 30 points for data integrity
+    
+    # Deduct points for orphaned records
+    orphaned = report.get('orphaned_records', 0)
+    if orphaned > 0:
+        score -= min(20, orphaned * 2)  # Up to 20 points for orphaned records
+    
+    # Deduct points for overdue goals
+    performance = report.get('performance_metrics', {})
+    overdue = performance.get('overdue_goals', 0)
+    if overdue > 0:
+        score -= min(25, overdue * 5)  # Up to 25 points for overdue goals
+    
+    return max(0, min(100, round(score)))
+
+def _get_goals_health_status(self, score):
+    """Get health status description from score"""
+    if score >= 90:
+        return 'excellent'
+    elif score >= 75:
+        return 'good'
+    elif score >= 50:
+        return 'fair'
+    elif score >= 25:
+        return 'poor'
+    else:
+        return 'critical'
+
+# IMPORTANT: Add this call to your existing initialize_database method
+def initialize_database_with_goals(self):
+    """Enhanced initialize_database method that includes goals"""
+    # Call your existing initialize_database method
+    self.initialize_database()
+    
+    # Then add goals system
+    self.create_goals_tables()
+    
+    logger.info("✅ Database initialized with goals system")
