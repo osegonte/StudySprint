@@ -221,7 +221,7 @@ class CreateGoalDialog(QDialog):
             
             if selected_id == 0:  # finish_by_date
                 goal_type = GoalType.FINISH_BY_DATE
-                target_value = 1  # Placeholder value for deadline goals
+                target_value = 0  # Placeholder value for deadline goals
                 qdate = self.deadline_date.date()
                 deadline = date(qdate.year(), qdate.month(), qdate.day())
             elif selected_id == 1:  # daily_time

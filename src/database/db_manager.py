@@ -2139,135 +2139,91 @@ def _get_health_status(self, score):
     else:
         return 'critical'
 def create_goals_tables(self):
-    """Create goals system tables if they don't exist"""
-    try:
-        logger.info("Creating goals system tables...")
+        """Create goals system tables if they don't exist"""
+        try:
+            logger.info("Creating goals system tables...")
+            
+            # Goals table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goals (
+                    id SERIAL PRIMARY KEY,
+                    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                    target_type TEXT CHECK (target_type IN ('finish_by_date', 'daily_time', 'daily_pages')),
+                    target_value INTEGER NOT NULL DEFAULT 0,
+                    deadline DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    completion_date TIMESTAMP,
+                    
+                    CONSTRAINT valid_deadline CHECK (
+                        (target_type = 'finish_by_date' AND deadline IS NOT NULL) OR
+                        (target_type != 'finish_by_date')
+                    ),
+                    CONSTRAINT valid_target_value CHECK (
+                        (target_type = 'finish_by_date' AND target_value >= 0) OR
+                        (target_type != 'finish_by_date' AND target_value > 0)
+                    )
+                )
+            """)
+            
+            # Goal progress table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goal_progress (
+                    id SERIAL PRIMARY KEY,
+                    goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+                    date DATE NOT NULL,
+                    pages_read INTEGER DEFAULT 0,
+                    time_spent_minutes INTEGER DEFAULT 0,
+                    sessions_count INTEGER DEFAULT 0,
+                    target_met BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    UNIQUE (goal_id, date),
+                    
+                    CONSTRAINT non_negative_pages CHECK (pages_read >= 0),
+                    CONSTRAINT non_negative_time CHECK (time_spent_minutes >= 0),
+                    CONSTRAINT non_negative_sessions CHECK (sessions_count >= 0)
+                )
+            """)
+            
+            # Goal adjustments table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS goal_adjustments (
+                    id SERIAL PRIMARY KEY,
+                    goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+                    adjustment_date DATE NOT NULL,
+                    old_daily_target INTEGER,
+                    new_daily_target INTEGER,
+                    reason TEXT,
+                    pages_behind INTEGER DEFAULT 0,
+                    days_remaining INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create basic indexes
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_goals_topic_id ON goals(topic_id)",
+                "CREATE INDEX IF NOT EXISTS idx_goals_active ON goals(is_active) WHERE is_active = TRUE",
+                "CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_id ON goal_progress(goal_id)",
+                "CREATE INDEX IF NOT EXISTS idx_goal_progress_date ON goal_progress(date)"
+            ]
+            
+            for index_sql in indexes:
+                try:
+                    self.cursor.execute(index_sql)
+                except Exception as e:
+                    logger.warning(f"Could not create index: {e}")
+            
+            self.connection.commit()
+            logger.info("✅ Goals system tables created successfully")
         
-        # Goals table
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS goals (
-                id SERIAL PRIMARY KEY,
-                topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
-                target_type TEXT CHECK (target_type IN ('finish_by_date', 'daily_time', 'daily_pages')),
-                target_value INTEGER NOT NULL,
-                deadline DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_active BOOLEAN DEFAULT TRUE,
-                is_completed BOOLEAN DEFAULT FALSE,
-                completion_date TIMESTAMP,
-                
-                CONSTRAINT valid_deadline CHECK (
-                    (target_type = 'finish_by_date' AND deadline IS NOT NULL) OR
-                    (target_type != 'finish_by_date' AND deadline IS NULL)
-                ),
-                CONSTRAINT positive_target_value CHECK (target_value > 0)
-            )
-        """)
-        
-        # Goal progress table
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS goal_progress (
-                id SERIAL PRIMARY KEY,
-                goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
-                date DATE NOT NULL,
-                pages_read INTEGER DEFAULT 0,
-                time_spent_minutes INTEGER DEFAULT 0,
-                sessions_count INTEGER DEFAULT 0,
-                target_met BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                
-                UNIQUE (goal_id, date),
-                
-                CONSTRAINT non_negative_pages CHECK (pages_read >= 0),
-                CONSTRAINT non_negative_time CHECK (time_spent_minutes >= 0),
-                CONSTRAINT non_negative_sessions CHECK (sessions_count >= 0)
-            )
-        """)
-        
-        # Goal adjustments table
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS goal_adjustments (
-                id SERIAL PRIMARY KEY,
-                goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
-                adjustment_date DATE NOT NULL,
-                old_daily_target INTEGER,
-                new_daily_target INTEGER,
-                reason TEXT,
-                pages_behind INTEGER DEFAULT 0,
-                days_remaining INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create indexes
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_goals_topic_id ON goals(topic_id)",
-            "CREATE INDEX IF NOT EXISTS idx_goals_active ON goals(is_active) WHERE is_active = TRUE",
-            "CREATE INDEX IF NOT EXISTS idx_goals_target_type ON goals(target_type)",
-            "CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_id ON goal_progress(goal_id)",
-            "CREATE INDEX IF NOT EXISTS idx_goal_progress_date ON goal_progress(date)",
-            "CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_date ON goal_progress(goal_id, date)",
-            "CREATE INDEX IF NOT EXISTS idx_goal_adjustments_goal_id ON goal_adjustments(goal_id)"
-        ]
-        
-        for index_sql in indexes:
-            try:
-                self.cursor.execute(index_sql)
-            except Exception as e:
-                logger.warning(f"Could not create index: {e}")
-        
-        # Create useful views
-        self.cursor.execute("""
-            CREATE OR REPLACE VIEW goal_summary AS
-            SELECT 
-                g.id,
-                g.target_type,
-                g.target_value,
-                g.deadline,
-                g.is_active,
-                g.is_completed,
-                t.name as topic_name,
-                COALESCE(SUM(gp.pages_read), 0) as total_pages_read,
-                COALESCE(SUM(gp.time_spent_minutes), 0) as total_time_spent,
-                COALESCE(COUNT(gp.date), 0) as days_tracked
-            FROM goals g
-            LEFT JOIN topics t ON g.topic_id = t.id
-            LEFT JOIN goal_progress gp ON g.id = gp.goal_id
-            GROUP BY g.id, g.target_type, g.target_value, g.deadline, g.is_active, g.is_completed, t.name
-        """)
-        
-        # Daily goal status view
-        self.cursor.execute("""
-            CREATE OR REPLACE VIEW daily_goal_status AS
-            SELECT 
-                g.id as goal_id,
-                g.target_type,
-                g.target_value,
-                t.name as topic_name,
-                CURRENT_DATE as today,
-                COALESCE(gp.pages_read, 0) as pages_read_today,
-                COALESCE(gp.time_spent_minutes, 0) as time_spent_today,
-                COALESCE(gp.sessions_count, 0) as sessions_today,
-                COALESCE(gp.target_met, FALSE) as target_met_today,
-                CASE 
-                    WHEN g.target_type = 'daily_pages' THEN g.target_value - COALESCE(gp.pages_read, 0)
-                    WHEN g.target_type = 'daily_time' THEN g.target_value - COALESCE(gp.time_spent_minutes, 0)
-                    ELSE 0
-                END as remaining_today
-            FROM goals g
-            LEFT JOIN topics t ON g.topic_id = t.id
-            LEFT JOIN goal_progress gp ON g.id = gp.goal_id AND gp.date = CURRENT_DATE
-            WHERE g.is_active = TRUE AND g.is_completed = FALSE
-        """)
-        
-        self.connection.commit()
-        logger.info("✅ Goals system tables created successfully")
-        
-    except Exception as e:
-        logger.error(f"Error creating goals tables: {e}")
-        raise
+        except Exception as e:
+            logger.error(f"Error creating goals tables: {e}")
+            raise
 
 def update_goal_progress_after_session(self, topic_id, pages_read, time_spent_minutes, session_date=None):
     """Update goal progress after a study session"""
