@@ -1348,3 +1348,792 @@ class DatabaseManager:
                 self.connection.close()
         except:
             pass
+# Additional methods for src/database/db_manager.py - Enhanced Timer Support
+
+def get_session_analytics(self, session_id):
+    """Get comprehensive analytics for a specific session"""
+    self.connect()
+    
+    try:
+        # Get session details
+        self.cursor.execute("""
+            SELECT s.*, p.title as pdf_title, e.title as exercise_title, t.name as topic_name
+            FROM sessions s
+            LEFT JOIN pdfs p ON s.pdf_id = p.id
+            LEFT JOIN exercise_pdfs e ON s.exercise_pdf_id = e.id
+            LEFT JOIN topics t ON s.topic_id = t.id
+            WHERE s.id = %s
+        """, (session_id,))
+        
+        session = self.cursor.fetchone()
+        if not session:
+            return None
+        
+        # Get page times for this session
+        self.cursor.execute("""
+            SELECT page_number, duration_seconds, start_time, end_time
+            FROM page_times
+            WHERE session_id = %s
+            ORDER BY start_time
+        """, (session_id,))
+        
+        page_times = self.cursor.fetchall()
+        
+        # Calculate analytics
+        total_pages = len(page_times)
+        if total_pages > 0:
+            avg_time_per_page = sum(pt['duration_seconds'] for pt in page_times) / total_pages
+            fastest_page = min(pt['duration_seconds'] for pt in page_times)
+            slowest_page = max(pt['duration_seconds'] for pt in page_times)
+        else:
+            avg_time_per_page = 0
+            fastest_page = 0
+            slowest_page = 0
+        
+        return {
+            'session': dict(session),
+            'page_times': [dict(pt) for pt in page_times],
+            'analytics': {
+                'total_pages_timed': total_pages,
+                'average_time_per_page': avg_time_per_page,
+                'fastest_page_time': fastest_page,
+                'slowest_page_time': slowest_page,
+                'reading_consistency': self._calculate_reading_consistency(page_times)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting session analytics: {e}")
+        return None
+
+def _calculate_reading_consistency(self, page_times):
+    """Calculate reading consistency score based on page time variance"""
+    if len(page_times) < 3:
+        return 0
+    
+    times = [pt['duration_seconds'] for pt in page_times]
+    mean_time = sum(times) / len(times)
+    
+    if mean_time == 0:
+        return 0
+    
+    # Calculate coefficient of variation
+    variance = sum((t - mean_time) ** 2 for t in times) / len(times)
+    std_dev = variance ** 0.5
+    cv = std_dev / mean_time
+    
+    # Convert to consistency score (0-100, lower CV = higher consistency)
+    consistency = max(0, 100 - (cv * 50))
+    return round(consistency)
+
+def get_reading_streaks(self, days=90):
+    """Get detailed reading streak information"""
+    self.connect()
+    
+    try:
+        self.cursor.execute("""
+            WITH daily_sessions AS (
+                SELECT DATE(start_time) as session_date,
+                       COUNT(*) as sessions_count,
+                       SUM(total_time_seconds) as daily_time,
+                       SUM(pages_visited) as daily_pages
+                FROM sessions
+                WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+                AND end_time IS NOT NULL
+                GROUP BY DATE(start_time)
+                ORDER BY session_date DESC
+            ),
+            streak_analysis AS (
+                SELECT session_date, sessions_count, daily_time, daily_pages,
+                       session_date - (ROW_NUMBER() OVER (ORDER BY session_date))::INTEGER as streak_group,
+                       ROW_NUMBER() OVER (ORDER BY session_date DESC) as days_ago
+                FROM daily_sessions
+            ),
+            current_streak AS (
+                SELECT COUNT(*) as current_streak_days,
+                       SUM(sessions_count) as streak_sessions,
+                       SUM(daily_time) as streak_total_time,
+                       SUM(daily_pages) as streak_total_pages,
+                       MIN(session_date) as streak_start,
+                       MAX(session_date) as streak_end,
+                       AVG(daily_time) as avg_daily_time
+                FROM streak_analysis
+                WHERE streak_group = (
+                    SELECT streak_group FROM streak_analysis 
+                    WHERE session_date = (SELECT MAX(session_date) FROM daily_sessions)
+                )
+            ),
+            longest_streak AS (
+                SELECT streak_group, COUNT(*) as streak_length,
+                       SUM(daily_time) as total_time,
+                       MIN(session_date) as start_date,
+                       MAX(session_date) as end_date
+                FROM streak_analysis
+                GROUP BY streak_group
+                ORDER BY streak_length DESC
+                LIMIT 1
+            )
+            SELECT 
+                cs.current_streak_days,
+                cs.streak_sessions,
+                cs.streak_total_time,
+                cs.streak_total_pages,
+                cs.streak_start,
+                cs.streak_end,
+                cs.avg_daily_time,
+                ls.streak_length as longest_streak_days,
+                ls.total_time as longest_streak_time,
+                ls.start_date as longest_streak_start,
+                ls.end_date as longest_streak_end
+            FROM current_streak cs
+            CROSS JOIN longest_streak ls
+        """, (days,))
+        
+        result = self.cursor.fetchone()
+        return dict(result) if result else None
+        
+    except Exception as e:
+        logger.error(f"Error getting reading streaks: {e}")
+        return None
+
+def get_topic_progress_summary(self, topic_id):
+    """Get comprehensive topic progress summary"""
+    self.connect()
+    
+    try:
+        # Get topic basic info
+        self.cursor.execute("SELECT * FROM topics WHERE id = %s", (topic_id,))
+        topic = self.cursor.fetchone()
+        
+        if not topic:
+            return None
+        
+        # Get PDFs in topic
+        pdfs = self.get_pdfs_by_topic(topic_id)
+        
+        # Calculate progress metrics
+        total_pages = sum(pdf.get('total_pages', 0) for pdf in pdfs)
+        read_pages = sum(pdf.get('current_page', 1) - 1 for pdf in pdfs)
+        progress_percent = (read_pages / total_pages * 100) if total_pages > 0 else 0
+        
+        # Get session data for this topic
+        self.cursor.execute("""
+            SELECT COUNT(*) as session_count,
+                   SUM(total_time_seconds) as total_study_time,
+                   SUM(active_time_seconds) as total_active_time,
+                   SUM(pages_visited) as total_pages_visited,
+                   AVG(total_time_seconds) as avg_session_length,
+                   MAX(start_time) as last_session_date
+            FROM sessions
+            WHERE topic_id = %s AND end_time IS NOT NULL
+        """, (topic_id,))
+        
+        session_stats = self.cursor.fetchone()
+        
+        # Get reading metrics for topic
+        topic_metrics = self.get_reading_metrics(topic_id=topic_id)
+        
+        return {
+            'topic': dict(topic),
+            'pdfs': pdfs,
+            'progress': {
+                'total_pages': total_pages,
+                'pages_read': read_pages,
+                'progress_percent': progress_percent,
+                'pdfs_completed': len([p for p in pdfs if p.get('current_page', 1) >= p.get('total_pages', 1)]),
+                'pdfs_in_progress': len([p for p in pdfs if 1 < p.get('current_page', 1) < p.get('total_pages', 1)]),
+                'pdfs_not_started': len([p for p in pdfs if p.get('current_page', 1) <= 1])
+            },
+            'session_stats': dict(session_stats) if session_stats else {},
+            'reading_metrics': topic_metrics or {}
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting topic progress summary: {e}")
+        return None
+
+def get_user_reading_patterns(self, days=30):
+    """Analyze user reading patterns and habits"""
+    self.connect()
+    
+    try:
+        # Get hourly reading patterns
+        self.cursor.execute("""
+            SELECT EXTRACT(HOUR FROM start_time) as hour,
+                   COUNT(*) as session_count,
+                   SUM(total_time_seconds) as total_time,
+                   AVG(total_time_seconds) as avg_session_length
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            GROUP BY EXTRACT(HOUR FROM start_time)
+            ORDER BY hour
+        """, (days,))
+        
+        hourly_patterns = self.cursor.fetchall()
+        
+        # Get weekly reading patterns
+        self.cursor.execute("""
+            SELECT EXTRACT(DOW FROM start_time) as day_of_week,
+                   COUNT(*) as session_count,
+                   SUM(total_time_seconds) as total_time,
+                   AVG(total_time_seconds) as avg_session_length
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            GROUP BY EXTRACT(DOW FROM start_time)
+            ORDER BY day_of_week
+        """, (days,))
+        
+        weekly_patterns = self.cursor.fetchall()
+        
+        # Get session length distribution
+        self.cursor.execute("""
+            SELECT 
+                CASE 
+                    WHEN total_time_seconds < 600 THEN 'short'  -- < 10 min
+                    WHEN total_time_seconds < 1800 THEN 'medium'  -- 10-30 min
+                    WHEN total_time_seconds < 3600 THEN 'long'   -- 30-60 min
+                    ELSE 'extended'  -- > 60 min
+                END as session_type,
+                COUNT(*) as count,
+                AVG(total_time_seconds) as avg_duration,
+                AVG(pages_visited) as avg_pages
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            GROUP BY session_type
+        """, (days,))
+        
+        session_distribution = self.cursor.fetchall()
+        
+        # Get efficiency patterns
+        self.cursor.execute("""
+            SELECT 
+                CASE 
+                    WHEN (active_time_seconds::FLOAT / total_time_seconds) >= 0.8 THEN 'high_efficiency'
+                    WHEN (active_time_seconds::FLOAT / total_time_seconds) >= 0.6 THEN 'medium_efficiency'
+                    ELSE 'low_efficiency'
+                END as efficiency_category,
+                COUNT(*) as session_count,
+                AVG(active_time_seconds::FLOAT / total_time_seconds) as avg_efficiency
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            AND total_time_seconds > 0
+            GROUP BY efficiency_category
+        """, (days,))
+        
+        efficiency_patterns = self.cursor.fetchall()
+        
+        return {
+            'analysis_period_days': days,
+            'hourly_patterns': [dict(row) for row in hourly_patterns],
+            'weekly_patterns': [dict(row) for row in weekly_patterns],
+            'session_distribution': [dict(row) for row in session_distribution],
+            'efficiency_patterns': [dict(row) for row in efficiency_patterns],
+            'insights': self._generate_reading_insights(hourly_patterns, weekly_patterns, session_distribution)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing reading patterns: {e}")
+        return None
+
+def _generate_reading_insights(self, hourly_patterns, weekly_patterns, session_distribution):
+    """Generate intelligent insights from reading patterns"""
+    insights = []
+    
+    # Peak reading hours
+    if hourly_patterns:
+        peak_hour = max(hourly_patterns, key=lambda x: x['total_time'])
+        insights.append(f"Your most productive reading hour is {peak_hour['hour']}:00")
+    
+    # Best reading day
+    if weekly_patterns:
+        day_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+        peak_day = max(weekly_patterns, key=lambda x: x['total_time'])
+        day_name = day_names[int(peak_day['day_of_week'])]
+        insights.append(f"You read most on {day_name}s")
+    
+    # Session length preference
+    if session_distribution:
+        preferred_type = max(session_distribution, key=lambda x: x['count'])
+        type_descriptions = {
+            'short': 'short sessions (under 10 minutes)',
+            'medium': 'medium sessions (10-30 minutes)',
+            'long': 'long sessions (30-60 minutes)',
+            'extended': 'extended sessions (over 1 hour)'
+        }
+        insights.append(f"You prefer {type_descriptions.get(preferred_type['session_type'], 'varied')} sessions")
+    
+    return insights
+
+def get_reading_goals_progress(self, user_id='default_user'):
+    """Get progress toward reading goals"""
+    self.connect()
+    
+    try:
+        # Get active goals
+        self.cursor.execute("""
+            SELECT * FROM study_goals
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+        """)
+        
+        goals = self.cursor.fetchall()
+        
+        goal_progress = []
+        
+        for goal in goals:
+            goal_dict = dict(goal)
+            
+            # Calculate current progress based on goal type
+            if goal['goal_type'] == 'daily_time':
+                # Daily time goal
+                today_stats = self.get_daily_reading_stats(datetime.now().date())
+                current_value = today_stats.get('total_time_seconds', 0) // 60 if today_stats else 0  # Convert to minutes
+                
+            elif goal['goal_type'] == 'daily_pages':
+                # Daily pages goal
+                today_stats = self.get_daily_reading_stats(datetime.now().date())
+                current_value = today_stats.get('total_pages_read', 0) if today_stats else 0
+                
+            elif goal['goal_type'] == 'weekly_sessions':
+                # Weekly sessions goal
+                self.cursor.execute("""
+                    SELECT COUNT(*) as session_count
+                    FROM sessions
+                    WHERE start_time >= DATE_TRUNC('week', CURRENT_DATE)
+                    AND end_time IS NOT NULL
+                """)
+                result = self.cursor.fetchone()
+                current_value = result['session_count'] if result else 0
+                
+            elif goal['goal_type'] == 'topic_completion':
+                # Topic completion goal
+                if goal['topic_id']:
+                    topic_progress = self.get_topic_progress_summary(goal['topic_id'])
+                    current_value = topic_progress['progress']['progress_percent'] if topic_progress else 0
+                else:
+                    current_value = 0
+                    
+            else:
+                current_value = goal['current_value']
+            
+            # Update current value in database
+            self.cursor.execute("""
+                UPDATE study_goals 
+                SET current_value = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (current_value, goal['id']))
+            
+            goal_dict['current_value'] = current_value
+            goal_dict['progress_percent'] = (current_value / goal['target_value'] * 100) if goal['target_value'] > 0 else 0
+            goal_dict['is_completed'] = current_value >= goal['target_value']
+            
+            goal_progress.append(goal_dict)
+        
+        self.connection.commit()
+        return goal_progress
+        
+    except Exception as e:
+        logger.error(f"Error getting reading goals progress: {e}")
+        return []
+
+def create_reading_goal(self, goal_type, target_value, target_date=None, topic_id=None, pdf_id=None):
+    """Create a new reading goal"""
+    self.connect()
+    
+    try:
+        with self.transaction():
+            self.cursor.execute("""
+                INSERT INTO study_goals (goal_type, target_value, target_date, topic_id, pdf_id)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (goal_type, target_value, target_date, topic_id, pdf_id))
+            
+            goal_id = self.cursor.fetchone()['id']
+            logger.info(f"Created reading goal: {goal_type} = {target_value}")
+            return goal_id
+            
+    except Exception as e:
+        logger.error(f"Error creating reading goal: {e}")
+        raise
+
+def get_productivity_metrics(self, days=7):
+    """Calculate comprehensive productivity metrics"""
+    self.connect()
+    
+    try:
+        # Get basic metrics
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as total_sessions,
+                SUM(total_time_seconds) as total_time,
+                SUM(active_time_seconds) as total_active_time,
+                SUM(pages_visited) as total_pages,
+                AVG(total_time_seconds) as avg_session_length,
+                AVG(active_time_seconds::FLOAT / NULLIF(total_time_seconds, 0)) as avg_efficiency
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+        """, (days,))
+        
+        basic_metrics = self.cursor.fetchone()
+        
+        # Get daily breakdown
+        self.cursor.execute("""
+            SELECT 
+                DATE(start_time) as study_date,
+                COUNT(*) as sessions,
+                SUM(total_time_seconds) as daily_time,
+                SUM(active_time_seconds) as daily_active_time,
+                SUM(pages_visited) as daily_pages
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            GROUP BY DATE(start_time)
+            ORDER BY study_date DESC
+        """, (days,))
+        
+        daily_breakdown = self.cursor.fetchall()
+        
+        # Calculate derived metrics
+        metrics = dict(basic_metrics) if basic_metrics else {}
+        
+        if metrics.get('total_active_time', 0) > 0 and metrics.get('total_pages', 0) > 0:
+            metrics['pages_per_minute'] = metrics['total_pages'] / (metrics['total_active_time'] / 60)
+            metrics['avg_time_per_page'] = metrics['total_active_time'] / metrics['total_pages']
+        else:
+            metrics['pages_per_minute'] = 0
+            metrics['avg_time_per_page'] = 0
+        
+        # Calculate consistency score
+        if len(daily_breakdown) >= 3:
+            daily_times = [day['daily_time'] for day in daily_breakdown]
+            mean_time = sum(daily_times) / len(daily_times)
+            if mean_time > 0:
+                variance = sum((t - mean_time) ** 2 for t in daily_times) / len(daily_times)
+                cv = (variance ** 0.5) / mean_time
+                metrics['consistency_score'] = max(0, 100 - (cv * 100))
+            else:
+                metrics['consistency_score'] = 0
+        else:
+            metrics['consistency_score'] = 0
+        
+        return {
+            'period_days': days,
+            'metrics': metrics,
+            'daily_breakdown': [dict(day) for day in daily_breakdown],
+            'productivity_rating': self._calculate_productivity_rating(metrics)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating productivity metrics: {e}")
+        return None
+
+def _calculate_productivity_rating(self, metrics):
+    """Calculate overall productivity rating"""
+    if not metrics:
+        return 'insufficient_data'
+    
+    # Scoring factors
+    efficiency = metrics.get('avg_efficiency', 0) * 100
+    consistency = metrics.get('consistency_score', 0)
+    daily_time = metrics.get('total_time', 0) / 7 / 60  # Average daily minutes
+    reading_speed = metrics.get('pages_per_minute', 0)
+    
+    # Calculate weighted score
+    score = 0
+    score += min(30, efficiency * 0.3)  # Up to 30 points for efficiency
+    score += min(25, consistency * 0.25)  # Up to 25 points for consistency
+    score += min(25, daily_time * 0.4)  # Up to 25 points for time (1 hour = 24 points)
+    score += min(20, reading_speed * 10)  # Up to 20 points for speed
+    
+    if score >= 80:
+        return 'excellent'
+    elif score >= 60:
+        return 'good'
+    elif score >= 40:
+        return 'fair'
+    elif score >= 20:
+        return 'poor'
+    else:
+        return 'very_poor'
+
+def export_session_data(self, start_date=None, end_date=None, format='csv'):
+    """Export session data for external analysis"""
+    self.connect()
+    
+    try:
+        # Build query with date filters
+        query = """
+            SELECT 
+                s.id as session_id,
+                s.start_time,
+                s.end_time,
+                s.total_time_seconds,
+                s.active_time_seconds,
+                s.idle_time_seconds,
+                s.pages_visited,
+                p.title as pdf_title,
+                e.title as exercise_title,
+                t.name as topic_name,
+                CASE WHEN s.exercise_pdf_id IS NOT NULL THEN 'exercise' ELSE 'main' END as document_type
+            FROM sessions s
+            LEFT JOIN pdfs p ON s.pdf_id = p.id
+            LEFT JOIN exercise_pdfs e ON s.exercise_pdf_id = e.id
+            LEFT JOIN topics t ON s.topic_id = t.id
+            WHERE s.end_time IS NOT NULL
+        """
+        
+        params = []
+        if start_date:
+            query += " AND s.start_time >= %s"
+            params.append(start_date)
+        if end_date:
+            query += " AND s.end_time <= %s"
+            params.append(end_date)
+            
+        query += " ORDER BY s.start_time DESC"
+        
+        self.cursor.execute(query, params)
+        sessions = self.cursor.fetchall()
+        
+        if format == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=sessions[0].keys() if sessions else [])
+            writer.writeheader()
+            for session in sessions:
+                writer.writerow(dict(session))
+            
+            return output.getvalue()
+            
+        elif format == 'json':
+            import json
+            return json.dumps([dict(session) for session in sessions], default=str, indent=2)
+            
+        else:
+            return [dict(session) for session in sessions]
+            
+    except Exception as e:
+        logger.error(f"Error exporting session data: {e}")
+        return None
+
+def get_session_heatmap_data(self, days=30):
+    """Get data for session activity heatmap visualization"""
+    self.connect()
+    
+    try:
+        self.cursor.execute("""
+            SELECT 
+                DATE(start_time) as date,
+                EXTRACT(HOUR FROM start_time) as hour,
+                COUNT(*) as session_count,
+                SUM(total_time_seconds) as total_time,
+                AVG(active_time_seconds::FLOAT / NULLIF(total_time_seconds, 0)) as avg_efficiency
+            FROM sessions
+            WHERE start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND end_time IS NOT NULL
+            GROUP BY DATE(start_time), EXTRACT(HOUR FROM start_time)
+            ORDER BY date DESC, hour
+        """, (days,))
+        
+        heatmap_data = self.cursor.fetchall()
+        
+        # Format for visualization
+        formatted_data = []
+        for row in heatmap_data:
+            formatted_data.append({
+                'date': row['date'].isoformat(),
+                'hour': int(row['hour']),
+                'session_count': row['session_count'],
+                'total_minutes': row['total_time'] // 60,
+                'efficiency_percent': round((row['avg_efficiency'] or 0) * 100, 1)
+            })
+        
+        return formatted_data
+        
+    except Exception as e:
+        logger.error(f"Error getting heatmap data: {e}")
+        return []
+
+def cleanup_old_sessions(self, days=90):
+    """Enhanced cleanup with detailed logging"""
+    self.connect()
+    
+    try:
+        with self.transaction():
+            # Get count before cleanup
+            self.cursor.execute("""
+                SELECT COUNT(*) as total_sessions,
+                       COUNT(CASE WHEN start_time < CURRENT_DATE - INTERVAL '%s days' THEN 1 END) as old_sessions
+                FROM sessions
+            """, (days,))
+            
+            counts = self.cursor.fetchone()
+            old_sessions_count = counts['old_sessions']
+            
+            if old_sessions_count == 0:
+                logger.info("No old sessions to clean up")
+                return 0
+            
+            # Clean up page times first (foreign key dependency)
+            self.cursor.execute("""
+                DELETE FROM page_times 
+                WHERE session_id IN (
+                    SELECT id FROM sessions 
+                    WHERE start_time < CURRENT_DATE - INTERVAL '%s days'
+                )
+            """, (days,))
+            
+            page_times_deleted = self.cursor.rowcount
+            
+            # Clean up old sessions
+            self.cursor.execute("""
+                DELETE FROM sessions 
+                WHERE start_time < CURRENT_DATE - INTERVAL '%s days'
+            """, (days,))
+            
+            sessions_deleted = self.cursor.rowcount
+            
+            logger.info(f"🧹 Cleaned up {sessions_deleted} old sessions and {page_times_deleted} page time records (retention: {days} days)")
+            return sessions_deleted
+            
+    except Exception as e:
+        logger.error(f"Failed to cleanup old sessions: {e}")
+        raise
+
+def optimize_database_performance(self):
+    """Optimize database performance for timer operations"""
+    self.connect()
+    
+    try:
+        # Create additional indexes for timer queries
+        performance_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_sessions_start_time_desc ON sessions(start_time DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_end_time_not_null ON sessions(end_time) WHERE end_time IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_active_composite ON sessions(start_time, end_time, total_time_seconds) WHERE end_time IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_page_times_session_page ON page_times(session_id, page_number)",
+            "CREATE INDEX IF NOT EXISTS idx_page_times_duration ON page_times(duration_seconds) WHERE duration_seconds > 0",
+            "CREATE INDEX IF NOT EXISTS idx_reading_metrics_composite ON reading_metrics(pdf_id, exercise_pdf_id, topic_id, last_calculated)",
+            "CREATE INDEX IF NOT EXISTS idx_study_goals_active ON study_goals(is_active, goal_type) WHERE is_active = TRUE"
+        ]
+        
+        for index_sql in performance_indexes:
+            try:
+                self.cursor.execute(index_sql)
+                logger.debug(f"Created index: {index_sql.split('idx_')[1].split(' ')[0]}")
+            except Exception as e:
+                logger.warning(f"Could not create index: {index_sql}, Error: {e}")
+        
+        # Update table statistics
+        self.cursor.execute("ANALYZE sessions, page_times, reading_metrics")
+        
+        self.connection.commit()
+        logger.info("✅ Database performance optimization completed")
+        
+    except Exception as e:
+        logger.error(f"Error optimizing database performance: {e}")
+        raise
+
+def get_database_health_report(self):
+    """Generate comprehensive database health report for timer system"""
+    self.connect()
+    
+    try:
+        health_report = {}
+        
+        # Basic table counts
+        tables = ['sessions', 'page_times', 'reading_metrics', 'study_goals']
+        for table in tables:
+            self.cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+            result = self.cursor.fetchone()
+            health_report[f'{table}_count'] = result['count']
+        
+        # Session data integrity
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as total_sessions,
+                COUNT(CASE WHEN end_time IS NULL THEN 1 END) as incomplete_sessions,
+                COUNT(CASE WHEN total_time_seconds <= 0 THEN 1 END) as zero_time_sessions,
+                COUNT(CASE WHEN active_time_seconds > total_time_seconds THEN 1 END) as invalid_time_sessions
+            FROM sessions
+        """)
+        
+        session_health = self.cursor.fetchone()
+        health_report['session_integrity'] = dict(session_health)
+        
+        # Database size information
+        self.cursor.execute("""
+            SELECT 
+                pg_size_pretty(pg_total_relation_size('sessions')) as sessions_size,
+                pg_size_pretty(pg_total_relation_size('page_times')) as page_times_size,
+                pg_size_pretty(pg_total_relation_size('reading_metrics')) as metrics_size
+        """)
+        
+        size_info = self.cursor.fetchone()
+        health_report['table_sizes'] = dict(size_info)
+        
+        # Performance metrics
+        recent_cutoff = datetime.now() - timedelta(days=30)
+        self.cursor.execute("""
+            SELECT 
+                AVG(total_time_seconds) as avg_session_duration,
+                AVG(pages_visited) as avg_pages_per_session,
+                COUNT(DISTINCT DATE(start_time)) as active_days
+            FROM sessions
+            WHERE start_time >= %s AND end_time IS NOT NULL
+        """, (recent_cutoff,))
+        
+        performance_metrics = self.cursor.fetchone()
+        health_report['performance_metrics'] = dict(performance_metrics) if performance_metrics else {}
+        
+        # Calculate overall health score
+        health_score = self._calculate_database_health_score(health_report)
+        health_report['overall_health_score'] = health_score
+        health_report['health_status'] = self._get_health_status(health_score)
+        
+        return health_report
+        
+    except Exception as e:
+        logger.error(f"Error generating database health report: {e}")
+        return {'error': str(e), 'health_status': 'error'}
+
+def _calculate_database_health_score(self, report):
+    """Calculate overall database health score (0-100)"""
+    score = 100
+    
+    # Deduct points for data integrity issues
+    session_integrity = report.get('session_integrity', {})
+    total_sessions = session_integrity.get('total_sessions', 1)
+    
+    if total_sessions > 0:
+        incomplete_ratio = session_integrity.get('incomplete_sessions', 0) / total_sessions
+        invalid_time_ratio = session_integrity.get('invalid_time_sessions', 0) / total_sessions
+        
+        score -= incomplete_ratio * 30  # Up to 30 points for incomplete sessions
+        score -= invalid_time_ratio * 40  # Up to 40 points for invalid time data
+    
+    # Deduct points for low activity
+    performance = report.get('performance_metrics', {})
+    active_days = performance.get('active_days', 0)
+    if active_days < 5:  # Less than 5 active days in last 30
+        score -= (5 - active_days) * 5  # Up to 25 points
+    
+    return max(0, min(100, round(score)))
+
+def _get_health_status(self, score):
+    """Get health status description from score"""
+    if score >= 90:
+        return 'excellent'
+    elif score >= 75:
+        return 'good'
+    elif score >= 50:
+        return 'fair'
+    elif score >= 25:
+        return 'poor'
+    else:
+        return 'critical'
