@@ -98,12 +98,12 @@ class DatabaseManager:
             self.has_file_data = False
     
     def initialize_database(self):
-        """Create tables if they don't exist"""
+        """Create tables if they don't exist - FIXED ORDER FOR PHASE 2"""
         self.connect()
         
         logger.info("Initializing database tables...")
         
-        # Create topics table
+        # Create topics table FIRST
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS topics (
                 id SERIAL PRIMARY KEY,
@@ -115,7 +115,7 @@ class DatabaseManager:
             )
         """)
         
-        # Create PDFs table with new schema (database storage)
+        # Create PDFs table SECOND
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS pdfs (
                 id SERIAL PRIMARY KEY,
@@ -132,7 +132,13 @@ class DatabaseManager:
             )
         """)
         
-        # Create reading sessions table (for future phases)
+        # Create exercise PDF tables THIRD (before Phase 2 tables that reference them)
+        self.create_exercise_tables()
+        
+        # Create Phase 2 tables FOURTH (now they can reference exercise_pdfs)
+        self.create_phase2_tables()
+        
+        # Create reading sessions table (legacy - for compatibility)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS reading_sessions (
                 id SERIAL PRIMARY KEY,
@@ -145,17 +151,12 @@ class DatabaseManager:
             )
         """)
         
-        # Create indexes for performance
+        # Create indexes for core tables
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdfs_topic_id ON pdfs(topic_id)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdfs_content_hash ON pdfs(content_hash)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_reading_sessions_pdf_id ON reading_sessions(pdf_id)")
         
         self.connection.commit()
-        # Create exercise PDF tables
-        self.create_exercise_tables()
-        
-        # Create Phase 2 tables
-        # self.create_phase2_tables()  # Temporarily disabled
         
         logger.info("✅ Database tables created successfully")
         
@@ -177,6 +178,189 @@ class DatabaseManager:
             logger.error(f"Transaction rolled back due to error: {e}")
             raise
     
+    def create_exercise_tables(self):
+        """Create tables for exercise PDF linking system - MOVED BEFORE PHASE 2"""
+        try:
+            logger.info("Creating exercise PDF tables...")
+            
+            # Exercise PDFs table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS exercise_pdfs (
+                    id SERIAL PRIMARY KEY,
+                    parent_pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
+                    title VARCHAR(255) NOT NULL,
+                    file_name VARCHAR(255) NOT NULL,
+                    file_data BYTEA NOT NULL,
+                    file_size BIGINT NOT NULL,
+                    content_hash VARCHAR(64) NOT NULL,
+                    total_pages INTEGER DEFAULT 0,
+                    current_page INTEGER DEFAULT 1,
+                    exercise_type VARCHAR(50) DEFAULT 'general',
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Exercise progress tracking
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS exercise_progress (
+                    id SERIAL PRIMARY KEY,
+                    exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
+                    parent_pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
+                    page_number INTEGER NOT NULL,
+                    completed BOOLEAN DEFAULT FALSE,
+                    difficulty_rating INTEGER CHECK (difficulty_rating >= 1 AND difficulty_rating <= 5),
+                    time_spent_minutes INTEGER DEFAULT 0,
+                    notes TEXT,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create indexes for performance
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_pdfs_parent_id ON exercise_pdfs(parent_pdf_id)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_pdfs_content_hash ON exercise_pdfs(content_hash)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_progress_exercise_id ON exercise_progress(exercise_pdf_id)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_progress_parent_id ON exercise_progress(parent_pdf_id)")
+            
+            # Don't commit here - let the main function handle it
+            logger.info("✅ Exercise PDF tables created successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to create exercise tables: {e}")
+            raise
+
+    def create_phase2_tables(self):
+        """Create Phase 2 timer and analytics tables - FIXED TRANSACTION HANDLING"""
+        logger.info("Creating Phase 2 tables...")
+        
+        try:
+            # Sessions table - now exercise_pdfs exists
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id SERIAL PRIMARY KEY,
+                    pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
+                    exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
+                    topic_id INTEGER,
+                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    total_time_seconds INTEGER DEFAULT 0,
+                    active_time_seconds INTEGER DEFAULT 0,
+                    idle_time_seconds INTEGER DEFAULT 0,
+                    pages_visited INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Page times table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS page_times (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER,
+                    pdf_id INTEGER,
+                    exercise_pdf_id INTEGER,
+                    page_number INTEGER NOT NULL,
+                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    duration_seconds INTEGER DEFAULT 0,
+                    interaction_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_page_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Reading metrics table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reading_metrics (
+                    id SERIAL PRIMARY KEY,
+                    pdf_id INTEGER,
+                    exercise_pdf_id INTEGER,
+                    topic_id INTEGER,
+                    user_id VARCHAR(50) DEFAULT 'default_user',
+                    pages_per_minute DECIMAL(8,2),
+                    average_time_per_page_seconds INTEGER,
+                    total_pages_read INTEGER DEFAULT 0,
+                    total_time_spent_seconds INTEGER DEFAULT 0,
+                    last_calculated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    
+                    CONSTRAINT check_metrics_pdf_type CHECK (
+                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                    )
+                )
+            """)
+            
+            # Study goals table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS study_goals (
+                    id SERIAL PRIMARY KEY,
+                    topic_id INTEGER,
+                    pdf_id INTEGER,
+                    goal_type VARCHAR(50) NOT NULL,
+                    target_value INTEGER NOT NULL,
+                    current_value INTEGER DEFAULT 0,
+                    target_date DATE,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create indexes - ALL columns exist now
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_sessions_pdf_id ON sessions(pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_exercise_pdf_id ON sessions(exercise_pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)",
+                "CREATE INDEX IF NOT EXISTS idx_page_times_session_id ON page_times(session_id)",
+                "CREATE INDEX IF NOT EXISTS idx_page_times_pdf_id ON page_times(pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_page_times_exercise_pdf_id ON page_times(exercise_pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_pdf_id ON reading_metrics(pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_exercise_pdf_id ON reading_metrics(exercise_pdf_id)",
+                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_topic_id ON reading_metrics(topic_id)",
+            ]
+            
+            for index_sql in indexes:
+                try:
+                    self.cursor.execute(index_sql)
+                except Exception as e:
+                    logger.warning(f"Could not create index: {index_sql}, Error: {e}")
+            
+            # Create views
+            self.cursor.execute("""
+                CREATE OR REPLACE VIEW daily_reading_stats AS
+                SELECT 
+                    DATE(start_time) as reading_date,
+                    COUNT(*) as sessions_count,
+                    SUM(total_time_seconds) as total_time_seconds,
+                    SUM(pages_visited) as total_pages_read,
+                    AVG(total_time_seconds::DECIMAL / NULLIF(pages_visited, 0)) as avg_seconds_per_page
+                FROM sessions 
+                WHERE end_time IS NOT NULL
+                GROUP BY DATE(start_time)
+                ORDER BY reading_date DESC
+            """)
+            
+            # Don't commit here - let the main function handle it
+            logger.info("✅ Phase 2 tables created successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to create Phase 2 tables: {e}")
+            raise
+
     def disconnect(self):
         """Disconnect from database"""
         try:
@@ -509,134 +693,6 @@ class DatabaseManager:
                 'error': str(e),
                 'connection': 'failed'
             }
-    def create_phase2_tables(self):
-        """Create Phase 2 timer and analytics tables"""
-        self.connect()
-        
-        logger.info("Creating Phase 2 tables...")
-        
-        try:
-            # Sessions table
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id SERIAL PRIMARY KEY,
-                    pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
-                    exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
-                    topic_id INTEGER,
-                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    end_time TIMESTAMP,
-                    total_time_seconds INTEGER DEFAULT 0,
-                    active_time_seconds INTEGER DEFAULT 0,
-                    idle_time_seconds INTEGER DEFAULT 0,
-                    pages_visited INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    CONSTRAINT check_pdf_type CHECK (
-                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
-                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
-                    )
-                )
-            """)
-            
-            # Page times table
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS page_times (
-                    id SERIAL PRIMARY KEY,
-                    session_id INTEGER,
-                    pdf_id INTEGER,
-                    exercise_pdf_id INTEGER,
-                    page_number INTEGER NOT NULL,
-                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    end_time TIMESTAMP,
-                    duration_seconds INTEGER DEFAULT 0,
-                    interaction_count INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    CONSTRAINT check_page_pdf_type CHECK (
-                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
-                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
-                    )
-                )
-            """)
-            
-            # Reading metrics table
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS reading_metrics (
-                    id SERIAL PRIMARY KEY,
-                    pdf_id INTEGER,
-                    exercise_pdf_id INTEGER,
-                    topic_id INTEGER,
-                    user_id VARCHAR(50) DEFAULT 'default_user',
-                    pages_per_minute DECIMAL(8,2),
-                    average_time_per_page_seconds INTEGER,
-                    total_pages_read INTEGER DEFAULT 0,
-                    total_time_spent_seconds INTEGER DEFAULT 0,
-                    last_calculated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    
-                    CONSTRAINT check_metrics_pdf_type CHECK (
-                        (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
-                        (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
-                    )
-                )
-            """)
-            
-            # Study goals table
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS study_goals (
-                    id SERIAL PRIMARY KEY,
-                    topic_id INTEGER,
-                    pdf_id INTEGER,
-                    goal_type VARCHAR(50) NOT NULL,
-                    target_value INTEGER NOT NULL,
-                    current_value INTEGER DEFAULT 0,
-                    target_date DATE,
-                    is_active BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create indexes
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_sessions_pdf_id ON sessions(pdf_id)",
-                # "CREATE INDEX IF NOT EXISTS idx_sessions_exercise_pdf_id ON sessions(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
-                "CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)",
-                "CREATE INDEX IF NOT EXISTS idx_page_times_session_id ON page_times(session_id)",
-                "CREATE INDEX IF NOT EXISTS idx_page_times_pdf_id ON page_times(pdf_id)",
-                # "CREATE INDEX IF NOT EXISTS idx_page_times_exercise_pdf_id ON page_times(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
-                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_pdf_id ON reading_metrics(pdf_id)",
-                # "CREATE INDEX IF NOT EXISTS idx_reading_metrics_exercise_pdf_id ON reading_metrics(exercise_pdf_id)",  # Will be created when exercise_pdfs table exists
-                "CREATE INDEX IF NOT EXISTS idx_reading_metrics_topic_id ON reading_metrics(topic_id)",
-            ]
-            
-            for index_sql in indexes:
-                self.cursor.execute(index_sql)
-            
-            # Create views
-            self.cursor.execute("""
-                CREATE OR REPLACE VIEW daily_reading_stats AS
-                SELECT 
-                    DATE(start_time) as reading_date,
-                    COUNT(*) as sessions_count,
-                    SUM(total_time_seconds) as total_time_seconds,
-                    SUM(pages_visited) as total_pages_read,
-                    AVG(total_time_seconds::DECIMAL / NULLIF(pages_visited, 0)) as avg_seconds_per_page
-                FROM sessions 
-                WHERE end_time IS NOT NULL
-                GROUP BY DATE(start_time)
-                ORDER BY reading_date DESC
-            """)
-            
-            self.connection.commit()
-            logger.info("✅ Phase 2 tables created successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to create Phase 2 tables: {e}")
-            self.connection.rollback()
-            raise
 
     def create_session(self, pdf_id=None, exercise_pdf_id=None, topic_id=None):
         """Create a new reading session"""
@@ -940,167 +996,7 @@ class DatabaseManager:
             logger.error(f"Failed to cleanup old sessions: {e}")
             raise
 
-
-
-    
-    def __del__(self):
-        """Ensure proper cleanup"""
-        try:
-            if self.cursor:
-                self.cursor.close()
-            if self.connection:
-                self.connection.close()
-        except:
-            pass
-    def delete_topic(self, topic_id):
-        """Delete a topic and all its PDFs"""
-        self.connect()
-        
-        try:
-            with self.transaction():
-                # First check how many PDFs will be deleted
-                self.cursor.execute("SELECT COUNT(*) as count FROM pdfs WHERE topic_id = %s", (topic_id,))
-                pdf_count = self.cursor.fetchone()['count']
-                
-                # Get topic name for logging
-                self.cursor.execute("SELECT name FROM topics WHERE id = %s", (topic_id,))
-                topic_result = self.cursor.fetchone()
-                topic_name = topic_result['name'] if topic_result else f"ID {topic_id}"
-                
-                logger.info(f"Deleting topic '{topic_name}' and {pdf_count} associated PDFs")
-                
-                # Delete the topic (CASCADE will delete associated PDFs)
-                self.cursor.execute("DELETE FROM topics WHERE id = %s", (topic_id,))
-                
-                if self.cursor.rowcount > 0:
-                    logger.info(f"✅ Topic '{topic_name}' deleted successfully")
-                    return True
-                else:
-                    logger.warning(f"Topic {topic_id} not found")
-                    return False
-                    
-        except Exception as e:
-            logger.error(f"Failed to delete topic {topic_id}: {e}")
-            raise
-
-    def delete_pdf(self, pdf_id):
-        """Delete a specific PDF"""
-        self.connect()
-        
-        try:
-            with self.transaction():
-                # Get PDF info for logging
-                self.cursor.execute("SELECT title, file_size FROM pdfs WHERE id = %s", (pdf_id,))
-                pdf_result = self.cursor.fetchone()
-                
-                if not pdf_result:
-                    logger.warning(f"PDF {pdf_id} not found")
-                    return False
-                
-                pdf_title = pdf_result['title']
-                file_size = pdf_result['file_size']
-                size_mb = file_size / (1024 * 1024) if file_size else 0
-                
-                logger.info(f"Deleting PDF '{pdf_title}' ({size_mb:.1f} MB)")
-                
-                # Delete the PDF
-                self.cursor.execute("DELETE FROM pdfs WHERE id = %s", (pdf_id,))
-                
-                if self.cursor.rowcount > 0:
-                    logger.info(f"✅ PDF '{pdf_title}' deleted successfully")
-                    return True
-                else:
-                    logger.warning(f"PDF {pdf_id} not found")
-                    return False
-                    
-        except Exception as e:
-            logger.error(f"Failed to delete PDF {pdf_id}: {e}")
-            raise
-
-    def rename_topic(self, topic_id, new_name):
-        """Rename a topic"""
-        self.connect()
-        
-        try:
-            with self.transaction():
-                # Get current name for logging
-                self.cursor.execute("SELECT name FROM topics WHERE id = %s", (topic_id,))
-                topic_result = self.cursor.fetchone()
-                old_name = topic_result['name'] if topic_result else f"ID {topic_id}"
-                
-                # Update the topic name
-                self.cursor.execute("""
-                    UPDATE topics 
-                    SET name = %s, updated_at = CURRENT_TIMESTAMP 
-                    WHERE id = %s
-                """, (new_name, topic_id))
-                
-                if self.cursor.rowcount > 0:
-                    logger.info(f"✅ Topic renamed from '{old_name}' to '{new_name}'")
-                    return True
-                else:
-                    logger.warning(f"Topic {topic_id} not found")
-                    return False
-                    
-        except Exception as e:
-            logger.error(f"Failed to rename topic {topic_id}: {e}")
-            raise
-
-    def create_exercise_tables(self):
-        """Create tables for exercise PDF linking system"""
-        try:
-            logger.info("Creating exercise PDF tables...")
-            
-            # Exercise PDFs table
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS exercise_pdfs (
-                    id SERIAL PRIMARY KEY,
-                    parent_pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
-                    title VARCHAR(255) NOT NULL,
-                    file_name VARCHAR(255) NOT NULL,
-                    file_data BYTEA NOT NULL,
-                    file_size BIGINT NOT NULL,
-                    content_hash VARCHAR(64) NOT NULL,
-                    total_pages INTEGER DEFAULT 0,
-                    current_page INTEGER DEFAULT 1,
-                    exercise_type VARCHAR(50) DEFAULT 'general',
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Exercise progress tracking
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS exercise_progress (
-                    id SERIAL PRIMARY KEY,
-                    exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
-                    parent_pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
-                    page_number INTEGER NOT NULL,
-                    completed BOOLEAN DEFAULT FALSE,
-                    difficulty_rating INTEGER CHECK (difficulty_rating >= 1 AND difficulty_rating <= 5),
-                    time_spent_minutes INTEGER DEFAULT 0,
-                    notes TEXT,
-                    completed_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create indexes for performance
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_pdfs_parent_id ON exercise_pdfs(parent_pdf_id)")
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_pdfs_content_hash ON exercise_pdfs(content_hash)")
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_progress_exercise_id ON exercise_progress(exercise_pdf_id)")
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_progress_parent_id ON exercise_progress(parent_pdf_id)")
-            
-            self.connection.commit()
-            logger.info("✅ Exercise PDF tables created successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to create exercise tables: {e}")
-            self.connection.rollback()
-            raise
-
+    # All the existing exercise PDF, deletion, and other methods remain exactly the same
     def add_exercise_pdf(self, parent_pdf_id, title, file_path, exercise_type="general", description=""):
         """Add an exercise PDF linked to a parent study PDF"""
         if not os.path.exists(file_path):
@@ -1276,6 +1172,100 @@ class DatabaseManager:
             logger.error(f"Error creating temporary exercise file: {e}")
             return None
 
+    def delete_topic(self, topic_id):
+        """Delete a topic and all its PDFs"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                # First check how many PDFs will be deleted
+                self.cursor.execute("SELECT COUNT(*) as count FROM pdfs WHERE topic_id = %s", (topic_id,))
+                pdf_count = self.cursor.fetchone()['count']
+                
+                # Get topic name for logging
+                self.cursor.execute("SELECT name FROM topics WHERE id = %s", (topic_id,))
+                topic_result = self.cursor.fetchone()
+                topic_name = topic_result['name'] if topic_result else f"ID {topic_id}"
+                
+                logger.info(f"Deleting topic '{topic_name}' and {pdf_count} associated PDFs")
+                
+                # Delete the topic (CASCADE will delete associated PDFs)
+                self.cursor.execute("DELETE FROM topics WHERE id = %s", (topic_id,))
+                
+                if self.cursor.rowcount > 0:
+                    logger.info(f"✅ Topic '{topic_name}' deleted successfully")
+                    return True
+                else:
+                    logger.warning(f"Topic {topic_id} not found")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete topic {topic_id}: {e}")
+            raise
+
+    def delete_pdf(self, pdf_id):
+        """Delete a specific PDF"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                # Get PDF info for logging
+                self.cursor.execute("SELECT title, file_size FROM pdfs WHERE id = %s", (pdf_id,))
+                pdf_result = self.cursor.fetchone()
+                
+                if not pdf_result:
+                    logger.warning(f"PDF {pdf_id} not found")
+                    return False
+                
+                pdf_title = pdf_result['title']
+                file_size = pdf_result['file_size']
+                size_mb = file_size / (1024 * 1024) if file_size else 0
+                
+                logger.info(f"Deleting PDF '{pdf_title}' ({size_mb:.1f} MB)")
+                
+                # Delete the PDF
+                self.cursor.execute("DELETE FROM pdfs WHERE id = %s", (pdf_id,))
+                
+                if self.cursor.rowcount > 0:
+                    logger.info(f"✅ PDF '{pdf_title}' deleted successfully")
+                    return True
+                else:
+                    logger.warning(f"PDF {pdf_id} not found")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete PDF {pdf_id}: {e}")
+            raise
+
+    def rename_topic(self, topic_id, new_name):
+        """Rename a topic"""
+        self.connect()
+        
+        try:
+            with self.transaction():
+                # Get current name for logging
+                self.cursor.execute("SELECT name FROM topics WHERE id = %s", (topic_id,))
+                topic_result = self.cursor.fetchone()
+                old_name = topic_result['name'] if topic_result else f"ID {topic_id}"
+                
+                # Update the topic name
+                self.cursor.execute("""
+                    UPDATE topics 
+                    SET name = %s, updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = %s
+                """, (new_name, topic_id))
+                
+                if self.cursor.rowcount > 0:
+                    logger.info(f"✅ Topic renamed from '{old_name}' to '{new_name}'")
+                    return True
+                else:
+                    logger.warning(f"Topic {topic_id} not found")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to rename topic {topic_id}: {e}")
+            raise
+
     def delete_exercise_pdf(self, exercise_id):
         """Delete an exercise PDF"""
         self.connect()
@@ -1348,3 +1338,13 @@ class DatabaseManager:
             logger.warning(f"Exercise PDF {exercise_id} not found")
             
         return exercise
+    
+    def __del__(self):
+        """Ensure proper cleanup"""
+        try:
+            if self.cursor:
+                self.cursor.close()
+            if self.connection:
+                self.connection.close()
+        except:
+            pass

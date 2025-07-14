@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QFont, QPixmap, QPainter, QColor, QPen
 from datetime import datetime, timedelta
 import logging
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +288,16 @@ class TimerWidget(QWidget):
         self.progress_bar.setVisible(False)
         self.reset_time_estimation()
         
+    def safe_float(self, value):
+        """Safely convert Decimal/None values to float"""
+        if value is None:
+            return 0.0
+        if isinstance(value, Decimal):
+            return float(value)
+        return float(value)
+        
     def update_time_estimation(self, current_page, total_pages):
-        """Update time estimation display"""
+        """Update time estimation display - FIXED decimal conversion"""
         if not self.reading_intelligence or not self.current_pdf_info:
             return
             
@@ -304,16 +313,16 @@ class TimerWidget(QWidget):
             )
             
             if estimation:
-                # Reading speed
-                avg_time = estimation.get('average_time_per_page', 0)
+                # Reading speed - FIXED decimal conversion
+                avg_time = self.safe_float(estimation.get('average_time_per_page', 0))
                 if avg_time > 0:
                     pages_per_minute = 60 / avg_time
                     self.reading_speed_label.setText(f"Speed: {pages_per_minute:.1f} pages/min")
                 else:
                     self.reading_speed_label.setText("Speed: Calculating...")
                 
-                # Time remaining
-                remaining_minutes = estimation.get('estimated_minutes', 0)
+                # Time remaining - FIXED decimal conversion
+                remaining_minutes = self.safe_float(estimation.get('estimated_minutes', 0))
                 if remaining_minutes > 0:
                     if remaining_minutes >= 60:
                         hours = int(remaining_minutes // 60)
@@ -322,9 +331,13 @@ class TimerWidget(QWidget):
                     else:
                         self.time_remaining_label.setText(f"{int(remaining_minutes)}m")
                         
-                    # Estimated finish time
-                    finish_time = datetime.now() + timedelta(minutes=remaining_minutes)
-                    self.estimated_finish_label.setText(finish_time.strftime("%H:%M"))
+                    # Estimated finish time - FIXED decimal conversion
+                    try:
+                        finish_time = datetime.now() + timedelta(minutes=remaining_minutes)
+                        self.estimated_finish_label.setText(finish_time.strftime("%H:%M"))
+                    except Exception as e:
+                        logger.warning(f"Error calculating finish time: {e}")
+                        self.estimated_finish_label.setText("Error")
                 else:
                     self.time_remaining_label.setText("Complete!")
                     self.estimated_finish_label.setText("Finished")
@@ -349,20 +362,20 @@ class TimerWidget(QWidget):
         self.confidence_label.setText("-")
         
     def update_daily_stats(self):
-        """Update daily statistics display"""
+        """Update daily statistics display - FIXED decimal conversion"""
         if not self.reading_intelligence:
             return
             
         try:
             stats = self.reading_intelligence.get_daily_stats()
             if stats:
-                sessions = stats.get('sessions_count', 0)
-                total_seconds = stats.get('total_time_seconds', 0)
-                total_pages = stats.get('total_pages_read', 0)
-                avg_seconds = stats.get('avg_seconds_per_page', 0)
+                sessions = stats.get('sessions_count', 0) or 0
+                total_seconds = self.safe_float(stats.get('total_time_seconds', 0))
+                total_pages = stats.get('total_pages_read', 0) or 0
+                avg_seconds = self.safe_float(stats.get('avg_seconds_per_page', 0))
                 
                 self.daily_sessions_label.setText(f"Sessions: {sessions}")
-                self.daily_time_label.setText(f"Time: {self.format_duration(total_seconds)}")
+                self.daily_time_label.setText(f"Time: {self.format_duration(int(total_seconds))}")
                 self.daily_pages_label.setText(f"Pages: {total_pages}")
                 self.daily_avg_label.setText(f"Avg: {int(avg_seconds)}s/page")
             else:
@@ -474,7 +487,7 @@ class TimerWidget(QWidget):
 
 
 class StudyDashboardWidget(QWidget):
-    """Enhanced dashboard showing study analytics and progress"""
+    """Enhanced dashboard showing study analytics and progress - FIXED decimal conversion"""
     
     def __init__(self, db_manager):
         super().__init__()
@@ -488,6 +501,14 @@ class StudyDashboardWidget(QWidget):
         
         self.setup_ui()
         self.apply_styles()
+        
+    def safe_float(self, value):
+        """Safely convert Decimal/None values to float"""
+        if value is None:
+            return 0.0
+        if isinstance(value, Decimal):
+            return float(value)
+        return float(value)
         
     def setup_ui(self):
         """Set up the dashboard UI"""
@@ -663,16 +684,16 @@ class StudyDashboardWidget(QWidget):
             logger.error(f"Error refreshing dashboard stats: {e}")
             
     def update_overview_stats(self):
-        """Update overview statistics"""
+        """Update overview statistics - FIXED decimal conversion"""
         try:
             # Get overall metrics
             metrics = self.reading_intelligence.get_reading_speed(user_wide=True) if self.reading_intelligence else None
             
             if metrics:
-                total_time = metrics.get('total_time_spent_seconds', 0)
-                total_pages = metrics.get('total_pages_read', 0)
+                total_time = self.safe_float(metrics.get('total_time_spent_seconds', 0))
+                total_pages = metrics.get('total_pages_read', 0) or 0
                 
-                self.total_study_time_label.setText(f"Total Study Time: {self.format_duration(total_time)}")
+                self.total_study_time_label.setText(f"Total Study Time: {self.format_duration(int(total_time))}")
                 self.total_pages_label.setText(f"Total Pages Read: {total_pages:,}")
             else:
                 self.total_study_time_label.setText("Total Study Time: No data")
@@ -680,23 +701,18 @@ class StudyDashboardWidget(QWidget):
             
             # Get session count from database
             try:
-                stats = self.db_manager.get_current_session_stats()
-                if stats:
-                    # This is a placeholder - you'd need to implement total session count
-                    self.total_sessions_label.setText("Total Sessions: Computing...")
-                    self.avg_session_time_label.setText("Avg Session Time: Computing...")
-                else:
-                    self.total_sessions_label.setText("Total Sessions: No data")
-                    self.avg_session_time_label.setText("Avg Session Time: No data")
+                # This would need to be implemented in db_manager
+                self.total_sessions_label.setText("Total Sessions: Computing...")
+                self.avg_session_time_label.setText("Avg Session Time: Computing...")
             except:
-                self.total_sessions_label.setText("Total Sessions: Error")
-                self.avg_session_time_label.setText("Avg Session Time: Error")
+                self.total_sessions_label.setText("Total Sessions: No data")
+                self.avg_session_time_label.setText("Avg Session Time: No data")
                 
         except Exception as e:
             logger.error(f"Error updating overview stats: {e}")
             
     def update_week_stats(self):
-        """Update this week's statistics"""
+        """Update this week's statistics - FIXED decimal conversion"""
         try:
             # Get week's session history
             if self.reading_intelligence:
@@ -704,12 +720,12 @@ class StudyDashboardWidget(QWidget):
                 
                 if history:
                     week_sessions = len(history)
-                    week_time = sum(session.get('total_time_seconds', 0) for session in history)
-                    week_pages = sum(session.get('pages_visited', 0) for session in history)
+                    week_time = sum(self.safe_float(session.get('total_time_seconds', 0)) for session in history)
+                    week_pages = sum(session.get('pages_visited', 0) or 0 for session in history)
                     daily_avg = week_time / 7 if week_time > 0 else 0
                     
                     self.week_sessions_label.setText(f"Sessions: {week_sessions}")
-                    self.week_time_label.setText(f"Study Time: {self.format_duration(week_time)}")
+                    self.week_time_label.setText(f"Study Time: {self.format_duration(int(week_time))}")
                     self.week_pages_label.setText(f"Pages Read: {week_pages}")
                     self.week_avg_label.setText(f"Daily Avg: {self.format_duration(int(daily_avg))}")
                 else:
@@ -727,14 +743,14 @@ class StudyDashboardWidget(QWidget):
             logger.error(f"Error updating week stats: {e}")
             
     def update_speed_stats(self):
-        """Update reading speed statistics"""
+        """Update reading speed statistics - FIXED decimal conversion"""
         try:
             if self.reading_intelligence:
                 metrics = self.reading_intelligence.get_reading_speed(user_wide=True)
                 
                 if metrics:
-                    speed = metrics.get('pages_per_minute', 0)
-                    avg_time = metrics.get('average_time_per_page_seconds', 0)
+                    speed = self.safe_float(metrics.get('pages_per_minute', 0))
+                    avg_time = self.safe_float(metrics.get('average_time_per_page_seconds', 0))
                     
                     self.overall_speed_label.setText(f"Overall Speed: {speed:.2f} pages/min")
                     
@@ -760,20 +776,20 @@ class StudyDashboardWidget(QWidget):
             logger.error(f"Error updating speed stats: {e}")
             
     def update_streak_stats(self):
-        """Update study streak statistics"""
+        """Update study streak statistics - FIXED decimal conversion"""
         try:
             # Get reading streaks
             streaks = self.db_manager.get_reading_streaks() if hasattr(self.db_manager, 'get_reading_streaks') else None
             
             if streaks:
-                current_streak = streaks.get('current_streak_days', 0)
-                streak_sessions = streaks.get('streak_sessions', 0)
-                streak_time = streaks.get('streak_total_time', 0)
+                current_streak = streaks.get('current_streak_days', 0) or 0
+                streak_sessions = streaks.get('streak_sessions', 0) or 0
+                streak_time = self.safe_float(streaks.get('streak_total_time', 0))
                 
                 self.current_streak_label.setText(f"Current Streak: {current_streak} days")
                 self.longest_streak_label.setText(f"Longest Streak: {current_streak} days")  # Placeholder
                 self.streak_sessions_label.setText(f"Streak Sessions: {streak_sessions}")
-                self.streak_time_label.setText(f"Streak Time: {self.format_duration(streak_time or 0)}")
+                self.streak_time_label.setText(f"Streak Time: {self.format_duration(int(streak_time))}")
             else:
                 self.current_streak_label.setText("Current Streak: 0 days")
                 self.longest_streak_label.setText("Longest Streak: 0 days")
@@ -793,8 +809,8 @@ class StudyDashboardWidget(QWidget):
                     activity_text = "Recent Sessions:\n"
                     for session in history[:5]:  # Show last 5 sessions
                         title = session.get('pdf_title') or session.get('exercise_title', 'Unknown')
-                        duration = self.format_duration(session.get('total_time_seconds', 0))
-                        pages = session.get('pages_visited', 0)
+                        duration = self.format_duration(int(self.safe_float(session.get('total_time_seconds', 0))))
+                        pages = session.get('pages_visited', 0) or 0
                         start_time = session.get('start_time', '')
                         
                         if start_time:

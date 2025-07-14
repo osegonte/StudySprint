@@ -3,3 +3,4 @@ PyQt6-tools>=6.4.2.3.3
 psycopg2-binary>=2.9.0
 PyMuPDF>=1.23.0
 python-dotenv>=1.0.0
+python-dateutil>=2.8.0
