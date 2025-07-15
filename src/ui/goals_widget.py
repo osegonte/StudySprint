@@ -1,11 +1,12 @@
-# src/ui/goals_widget.py - Optimized Version
+# src/ui/goals_widget.py - Comprehensive Goals UI
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                             QPushButton, QLabel, QComboBox, QSpinBox, QDateEdit,
                             QGroupBox, QScrollArea, QProgressBar, QFrame,
                             QDialog, QFormLayout, QRadioButton, QButtonGroup,
-                            QMessageBox, QCheckBox)
+                            QTextEdit, QTabWidget, QMessageBox, QSizePolicy,
+                            QApplication, QCheckBox)
 from PyQt6.QtCore import Qt, QDate, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPixmap, QPainter, QColor, QPen, QBrush, QIcon
 from datetime import datetime, date, timedelta
 import logging
 
@@ -14,7 +15,7 @@ from utils.goals_manager import GoalsManager, GoalType, GoalStatus
 logger = logging.getLogger(__name__)
 
 class CreateGoalDialog(QDialog):
-    """Streamlined goal creation dialog"""
+    """Dialog for creating new study goals"""
     
     goal_created = pyqtSignal(dict)
     
@@ -25,7 +26,7 @@ class CreateGoalDialog(QDialog):
         self.goals_manager = GoalsManager(db_manager)
         
         self.setWindowTitle("Create Study Goal")
-        self.setMinimumSize(450, 350)
+        self.setMinimumSize(500, 400)
         self.setup_ui()
         self.connect_signals()
     
@@ -38,7 +39,7 @@ class CreateGoalDialog(QDialog):
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header)
         
-        # Form
+        # Form layout
         form_group = QGroupBox("Goal Details")
         form_layout = QFormLayout()
         
@@ -49,7 +50,7 @@ class CreateGoalDialog(QDialog):
             self.topic_combo.addItem(f"📁 {topic['name']}", topic['id'])
         form_layout.addRow("📚 Topic:", self.topic_combo)
         
-        # Goal type
+        # Goal type selection
         goal_type_group = QGroupBox("Goal Type")
         goal_type_layout = QVBoxLayout()
         
@@ -71,25 +72,25 @@ class CreateGoalDialog(QDialog):
         goal_type_group.setLayout(goal_type_layout)
         form_layout.addRow(goal_type_group)
         
-        # Target inputs
+        # Target value inputs (conditional)
         self.target_frame = QFrame()
         target_layout = QFormLayout()
         
-        # Deadline
+        # Deadline selector (for finish_by_date)
         self.deadline_date = QDateEdit()
         self.deadline_date.setCalendarPopup(True)
-        self.deadline_date.setDate(QDate.currentDate().addDays(30))
+        self.deadline_date.setDate(QDate.currentDate().addDays(30))  # Default 30 days
         self.deadline_date.setMinimumDate(QDate.currentDate().addDays(1))
         target_layout.addRow("📅 Deadline:", self.deadline_date)
         
-        # Minutes
+        # Minutes selector (for daily_time)
         self.minutes_spin = QSpinBox()
-        self.minutes_spin.setRange(5, 480)
+        self.minutes_spin.setRange(5, 480)  # 5 minutes to 8 hours
         self.minutes_spin.setValue(30)
         self.minutes_spin.setSuffix(" minutes")
         target_layout.addRow("⏰ Daily Time:", self.minutes_spin)
         
-        # Pages
+        # Pages selector (for daily_pages)
         self.pages_spin = QSpinBox()
         self.pages_spin.setRange(1, 100)
         self.pages_spin.setValue(5)
@@ -99,7 +100,7 @@ class CreateGoalDialog(QDialog):
         self.target_frame.setLayout(target_layout)
         form_layout.addRow(self.target_frame)
         
-        # Preview
+        # Goal preview
         self.preview_label = QLabel()
         self.preview_label.setWordWrap(True)
         self.preview_label.setStyleSheet("""
@@ -134,7 +135,9 @@ class CreateGoalDialog(QDialog):
                 border-radius: 6px;
                 border: none;
             }
-            QPushButton:hover { background-color: #1e7e34; }
+            QPushButton:hover {
+                background-color: #1e7e34;
+            }
         """)
         
         button_layout.addStretch()
@@ -144,6 +147,7 @@ class CreateGoalDialog(QDialog):
         layout.addLayout(button_layout)
         self.setLayout(layout)
         
+        # Initial UI state
         self.update_ui_state()
         self.update_preview()
     
@@ -157,15 +161,15 @@ class CreateGoalDialog(QDialog):
         self.pages_spin.valueChanged.connect(self.update_preview)
     
     def update_ui_state(self):
-        """Update UI based on goal type"""
+        """Update UI based on selected goal type"""
         selected_id = self.goal_type_group.checkedId()
         
-        # Show/hide inputs
-        self.deadline_date.setVisible(selected_id == 0)
-        self.minutes_spin.setVisible(selected_id == 1)
-        self.pages_spin.setVisible(selected_id == 2)
+        # Show/hide appropriate inputs
+        self.deadline_date.setVisible(selected_id == 0)  # finish_by_date
+        self.minutes_spin.setVisible(selected_id == 1)   # daily_time
+        self.pages_spin.setVisible(selected_id == 2)     # daily_pages
         
-        # Update labels visibility
+        # Update labels
         for i in range(self.target_frame.layout().rowCount()):
             item = self.target_frame.layout().itemAt(i, QFormLayout.ItemRole.LabelRole)
             if item and item.widget():
@@ -180,7 +184,7 @@ class CreateGoalDialog(QDialog):
                     label.setVisible(False)
     
     def update_preview(self):
-        """Update goal preview"""
+        """Update goal preview text"""
         topic_index = self.topic_combo.currentIndex()
         if topic_index <= 0:
             self.preview_label.setText("Please select a topic to see goal preview")
@@ -190,15 +194,15 @@ class CreateGoalDialog(QDialog):
         topic_name = self.topic_combo.currentText().replace("📁 ", "")
         selected_id = self.goal_type_group.checkedId()
         
-        if selected_id == 0:
+        if selected_id == 0:  # finish_by_date
             qdate = self.deadline_date.date()
             deadline = date(qdate.year(), qdate.month(), qdate.day())
             days_until = (deadline - date.today()).days
-            preview_text = f"🎯 Finish all PDFs in '{topic_name}' by {deadline.strftime('%B %d, %Y')} ({days_until} days)"
-        elif selected_id == 1:
+            preview_text = f"🎯 Finish all PDFs in '{topic_name}' by {deadline.strftime('%B %d, %Y')} ({days_until} days from now)"
+        elif selected_id == 1:  # daily_time
             minutes = self.minutes_spin.value()
             preview_text = f"⏰ Study '{topic_name}' for {minutes} minutes every day"
-        else:
+        else:  # daily_pages
             pages = self.pages_spin.value()
             preview_text = f"📄 Read {pages} pages from '{topic_name}' every day"
         
@@ -215,20 +219,21 @@ class CreateGoalDialog(QDialog):
             
             selected_id = self.goal_type_group.checkedId()
             
-            if selected_id == 0:
+            if selected_id == 0:  # finish_by_date
                 goal_type = GoalType.FINISH_BY_DATE
-                target_value = 0
+                target_value = 0  # Placeholder value for deadline goals
                 qdate = self.deadline_date.date()
                 deadline = date(qdate.year(), qdate.month(), qdate.day())
-            elif selected_id == 1:
+            elif selected_id == 1:  # daily_time
                 goal_type = GoalType.DAILY_TIME
                 target_value = self.minutes_spin.value()
                 deadline = None
-            else:
+            else:  # daily_pages
                 goal_type = GoalType.DAILY_PAGES
                 target_value = self.pages_spin.value()
                 deadline = None
             
+            # Create goal
             goal_id = self.goals_manager.create_goal(
                 topic_id=topic_id,
                 target_type=goal_type,
@@ -247,26 +252,27 @@ class CreateGoalDialog(QDialog):
                 })
                 self.accept()
             else:
-                QMessageBox.warning(self, "Error", "Failed to create goal")
+                QMessageBox.warning(self, "Error", "Failed to create goal. You may already have a similar goal for this topic.")
                 
         except Exception as e:
             logger.error(f"Error creating goal: {e}")
             QMessageBox.critical(self, "Error", f"Failed to create goal: {str(e)}")
 
-
 class GoalCard(QFrame):
-    """Optimized goal display card"""
+    """Individual goal display card"""
     
-    goal_clicked = pyqtSignal(int)
+    goal_clicked = pyqtSignal(int)  # goal_id
+    goal_modified = pyqtSignal(int)  # goal_id
     
-    def __init__(self, goal_data):
+    def __init__(self, goal_data, daily_plan=None):
         super().__init__()
         self.goal_data = goal_data
+        self.daily_plan = daily_plan
         self.setup_ui()
         self.setMouseTracking(True)
     
     def setup_ui(self):
-        """Set up goal card UI"""
+        """Set up the goal card UI"""
         self.setFrameStyle(QFrame.Shape.Box)
         self.setLineWidth(2)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -277,6 +283,7 @@ class GoalCard(QFrame):
         # Header
         header_layout = QHBoxLayout()
         
+        # Goal type icon and title
         goal_type = self.goal_data['target_type']
         if goal_type == 'finish_by_date':
             icon = "📅"
@@ -323,18 +330,41 @@ class GoalCard(QFrame):
             details_layout.addWidget(QLabel(f"📅 Deadline: {deadline.strftime('%B %d, %Y')}"))
             details_layout.addWidget(QLabel(f"⏳ Days remaining: {days_remaining}"))
             
+            if self.daily_plan:
+                details_layout.addWidget(QLabel(f"📖 Pages needed daily: {self.daily_plan.adjusted_daily_target}"))
+                
         elif goal_type == 'daily_time':
             details_layout.addWidget(QLabel(f"⏰ Target: {self.goal_data['target_value']} minutes/day"))
+            total_time = self.goal_data.get('total_time_spent', 0)
+            details_layout.addWidget(QLabel(f"📊 Total time: {total_time} minutes"))
             
-        else:
+        else:  # daily_pages
             details_layout.addWidget(QLabel(f"📄 Target: {self.goal_data['target_value']} pages/day"))
+            total_pages = self.goal_data.get('total_pages_read', 0)
+            details_layout.addWidget(QLabel(f"📊 Total pages: {total_pages}"))
         
         layout.addLayout(details_layout)
+        
+        # Daily plan message
+        if self.daily_plan and self.daily_plan.message:
+            message_label = QLabel(self.daily_plan.message)
+            message_label.setWordWrap(True)
+            message_label.setStyleSheet("""
+                QLabel {
+                    background-color: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                    border-radius: 4px;
+                    padding: 8px;
+                    margin-top: 5px;
+                }
+            """)
+            layout.addWidget(message_label)
+        
         self.setLayout(layout)
         self._apply_status_styling()
     
     def _create_status_label(self):
-        """Create status indicator"""
+        """Create status indicator label"""
         status = self.goal_data.get('status', 'on_track')
         
         status_icons = {
@@ -353,10 +383,10 @@ class GoalCard(QFrame):
         return label
     
     def _apply_status_styling(self):
-        """Apply styling based on status"""
+        """Apply styling based on goal status"""
         status = self.goal_data.get('status', 'on_track')
         
-        colors = {
+        style_map = {
             'on_track': "#28a745",
             'slightly_behind': "#ffc107", 
             'behind': "#fd7e14",
@@ -365,7 +395,7 @@ class GoalCard(QFrame):
             'completed': "#6f42c1"
         }
         
-        color = colors.get(status, "#6c757d")
+        color = style_map.get(status, "#6c757d")
         
         self.setStyleSheet(f"""
             GoalCard {{
@@ -375,6 +405,7 @@ class GoalCard(QFrame):
             }}
             GoalCard:hover {{
                 background-color: #f8f9fa;
+                border-color: {color};
             }}
         """)
     
@@ -384,16 +415,15 @@ class GoalCard(QFrame):
             self.goal_clicked.emit(self.goal_data['id'])
         super().mousePressEvent(event)
 
-
 class DailyProgressWidget(QWidget):
-    """Optimized daily progress display"""
+    """Widget showing today's progress across all goals"""
     
     def __init__(self, goals_manager):
         super().__init__()
         self.goals_manager = goals_manager
         self.setup_ui()
         
-        # Auto-refresh timer
+        # Auto-refresh every 5 minutes
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_progress)
         self.refresh_timer.start(300000)  # 5 minutes
@@ -412,6 +442,7 @@ class DailyProgressWidget(QWidget):
         self.refresh_btn = QPushButton("🔄")
         self.refresh_btn.setMaximumWidth(40)
         self.refresh_btn.clicked.connect(self.refresh_progress)
+        self.refresh_btn.setToolTip("Refresh progress")
         
         header_layout.addWidget(title)
         header_layout.addStretch()
@@ -425,7 +456,7 @@ class DailyProgressWidget(QWidget):
         self.overall_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.overall_status)
         
-        # Progress container
+        # Progress list
         self.progress_scroll = QScrollArea()
         self.progress_widget = QWidget()
         self.progress_layout = QVBoxLayout()
@@ -434,13 +465,14 @@ class DailyProgressWidget(QWidget):
         self.progress_scroll.setWidgetResizable(True)
         
         layout.addWidget(self.progress_scroll)
+        
         self.setLayout(layout)
         self.refresh_progress()
     
     def refresh_progress(self):
-        """Refresh today's progress"""
+        """Refresh today's progress display"""
         try:
-            # Clear existing items
+            # Clear existing progress items
             for i in reversed(range(self.progress_layout.count())):
                 child = self.progress_layout.itemAt(i).widget()
                 if child:
@@ -467,10 +499,13 @@ class DailyProgressWidget(QWidget):
                 self.progress_layout.addWidget(no_goals_label)
             
         except Exception as e:
-            logger.error(f"Error refreshing progress: {e}")
+            logger.error(f"Error refreshing daily progress: {e}")
+            error_label = QLabel("Error loading progress data")
+            error_label.setStyleSheet("color: #dc3545; padding: 20px;")
+            self.progress_layout.addWidget(error_label)
     
     def _update_overall_status(self, status):
-        """Update overall status display"""
+        """Update overall daily status display"""
         status_messages = {
             'all_completed': ('🎉', 'All daily goals completed!', '#28a745'),
             'mostly_completed': ('👍', 'Most goals completed', '#17a2b8'),
@@ -493,9 +528,10 @@ class DailyProgressWidget(QWidget):
         """)
     
     def _add_daily_goal_item(self, goal):
-        """Add daily goal progress item"""
+        """Add a daily goal progress item"""
         item_frame = QFrame()
         item_frame.setFrameStyle(QFrame.Shape.Box)
+        item_frame.setLineWidth(1)
         
         layout = QHBoxLayout()
         layout.setContentsMargins(10, 8, 10, 8)
@@ -524,8 +560,7 @@ class DailyProgressWidget(QWidget):
         progress_bar.setMaximumHeight(20)
         
         # Status
-        status_icon = "✅" if goal['target_met_today'] else "📚"
-        status_label = QLabel(status_icon)
+        status_label = self._create_daily_status_label(goal)
         
         layout.addWidget(goal_label)
         layout.addWidget(progress_bar)
@@ -536,27 +571,241 @@ class DailyProgressWidget(QWidget):
         self.progress_layout.addWidget(item_frame)
     
     def _add_deadline_goal_item(self, goal):
-        """Add deadline goal progress item"""
+        """Add a deadline goal progress item"""
         item_frame = QFrame()
         item_frame.setFrameStyle(QFrame.Shape.Box)
+        item_frame.setLineWidth(1)
         
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 8)
         
+        # Header
+        header_layout = QHBoxLayout()
         goal_label = QLabel(f"📅 {goal['topic_name']}")
         goal_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         
-        contribution_label = QLabel(f"Today: {goal['pages_read_today']} pages, {goal['time_spent_today']} minutes")
+        status_label = QLabel("📊 Deadline Goal")
+        status_label.setFont(QFont("Arial", 10))
         
-        layout.addWidget(goal_label)
+        header_layout.addWidget(goal_label)
+        header_layout.addStretch()
+        header_layout.addWidget(status_label)
+        
+        layout.addLayout(header_layout)
+        
+        # Today's contribution
+        contribution_label = QLabel(f"Today: {goal['pages_read_today']} pages, {goal['time_spent_today']} minutes")
         layout.addWidget(contribution_label)
         
         item_frame.setLayout(layout)
         self.progress_layout.addWidget(item_frame)
+    
+    def _create_daily_status_label(self, goal):
+        """Create status label for daily goals"""
+        status = goal.get('status', 'not_started')
+        
+        status_info = {
+            'completed': ('✅', '#28a745'),
+            'almost_done': ('🔥', '#17a2b8'),
+            'halfway': ('⚡', '#ffc107'),
+            'started': ('📚', '#fd7e14'),
+            'not_started': ('💤', '#6c757d')
+        }
+        
+        icon, color = status_info.get(status, ('❓', '#6c757d'))
+        
+        label = QLabel(icon)
+        label.setStyleSheet(f"color: {color}; font-size: 16px;")
+        label.setToolTip(status.replace('_', ' ').title())
+        
+        return label
 
+class GoalsAnalyticsWidget(QWidget):
+    """Widget for displaying goal analytics and insights"""
+    
+    def __init__(self, goals_manager):
+        super().__init__()
+        self.goals_manager = goals_manager
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Set up analytics UI"""
+        layout = QVBoxLayout()
+        
+        # Header
+        header = QLabel("📊 Goals Analytics")
+        header.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        layout.addWidget(header)
+        
+        # Tab widget for different analytics views
+        self.tabs = QTabWidget()
+        
+        # Overview tab
+        self.overview_tab = self._create_overview_tab()
+        self.tabs.addTab(self.overview_tab, "📈 Overview")
+        
+        # Trends tab
+        self.trends_tab = self._create_trends_tab()
+        self.tabs.addTab(self.trends_tab, "📉 Trends")
+        
+        # Insights tab
+        self.insights_tab = self._create_insights_tab()
+        self.tabs.addTab(self.insights_tab, "💡 Insights")
+        
+        layout.addWidget(self.tabs)
+        self.setLayout(layout)
+    
+    def _create_overview_tab(self):
+        """Create overview analytics tab"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # Summary cards
+        summary_layout = QGridLayout()
+        
+        self.active_goals_card = self._create_metric_card("🎯", "Active Goals", "0")
+        self.completed_goals_card = self._create_metric_card("✅", "Completed", "0") 
+        self.success_rate_card = self._create_metric_card("📈", "Success Rate", "0%")
+        self.streak_card = self._create_metric_card("🔥", "Current Streak", "0 days")
+        
+        summary_layout.addWidget(self.active_goals_card, 0, 0)
+        summary_layout.addWidget(self.completed_goals_card, 0, 1)
+        summary_layout.addWidget(self.success_rate_card, 1, 0)
+        summary_layout.addWidget(self.streak_card, 1, 1)
+        
+        layout.addLayout(summary_layout)
+        
+        # Recent activity
+        activity_group = QGroupBox("Recent Activity")
+        self.activity_list = QVBoxLayout()
+        activity_group.setLayout(self.activity_list)
+        layout.addWidget(activity_group)
+        
+        widget.setLayout(layout)
+        return widget
+    
+    def _create_trends_tab(self):
+        """Create trends analytics tab"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        trends_label = QLabel("📊 Trend analysis coming soon...")
+        trends_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(trends_label)
+        
+        widget.setLayout(layout)
+        return widget
+    
+    def _create_insights_tab(self):
+        """Create insights tab"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        
+        self.insights_text = QTextEdit()
+        self.insights_text.setReadOnly(True)
+        layout.addWidget(self.insights_text)
+        
+        widget.setLayout(layout)
+        return widget
+    
+    def _create_metric_card(self, icon, title, value):
+        """Create a metric display card"""
+        card = QFrame()
+        card.setFrameStyle(QFrame.Shape.Box)
+        card.setLineWidth(1)
+        card.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 2px solid #dee2e6;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        
+        icon_label = QLabel(icon)
+        icon_label.setFont(QFont("Arial", 24))
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Arial", 12))
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        value_label = QLabel(value)
+        value_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        value_label.setObjectName("value_label")  # For easy updates
+        
+        layout.addWidget(icon_label)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        
+        card.setLayout(layout)
+        return card
+    
+    def refresh_analytics(self):
+        """Refresh analytics data"""
+        try:
+            # Get all active goals
+            active_goals = self.goals_manager.get_active_goals()
+            
+            # Update metric cards
+            self._update_metric_card(self.active_goals_card, str(len(active_goals)))
+            
+            # Calculate other metrics
+            completed_count = len([g for g in active_goals if g.get('status') == 'completed'])
+            self._update_metric_card(self.completed_goals_card, str(completed_count))
+            
+            # TODO: Calculate success rate and streak from actual data
+            self._update_metric_card(self.success_rate_card, "85%")
+            self._update_metric_card(self.streak_card, "3 days")
+            
+            # Update insights
+            self._update_insights(active_goals)
+            
+        except Exception as e:
+            logger.error(f"Error refreshing analytics: {e}")
+    
+    def _update_metric_card(self, card, value):
+        """Update a metric card's value"""
+        value_label = card.findChild(QLabel, "value_label")
+        if value_label:
+            value_label.setText(value)
+    
+    def _update_insights(self, goals):
+        """Update insights text"""
+        insights = []
+        
+        if not goals:
+            insights.append("🎯 Create your first goal to start tracking progress!")
+        else:
+            insights.append(f"📊 You have {len(goals)} active goals")
+            
+            # Analyze goal types
+            goal_types = {}
+            for goal in goals:
+                goal_type = goal['target_type']
+                goal_types[goal_type] = goal_types.get(goal_type, 0) + 1
+            
+            for goal_type, count in goal_types.items():
+                type_name = goal_type.replace('_', ' ').title()
+                insights.append(f"• {count} {type_name} goal(s)")
+            
+            # Check for goals at risk
+            behind_goals = [g for g in goals if g.get('status') in ['behind', 'very_behind']]
+            if behind_goals:
+                insights.append(f"⚠️ {len(behind_goals)} goal(s) are behind schedule")
+            
+            # Motivational messages
+            on_track_goals = [g for g in goals if g.get('status') == 'on_track']
+            if on_track_goals:
+                insights.append(f"🟢 {len(on_track_goals)} goal(s) are on track - keep it up!")
+        
+        self.insights_text.setText('\n'.join(insights))
 
 class GoalsMainWidget(QWidget):
-    """Main optimized goals widget"""
+    """Main goals management widget"""
     
     def __init__(self, db_manager):
         super().__init__()
@@ -570,7 +819,7 @@ class GoalsMainWidget(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # Header
+        # Header with actions
         header_layout = QHBoxLayout()
         
         title = QLabel("🎯 Study Goals")
@@ -587,7 +836,9 @@ class GoalsMainWidget(QWidget):
                 border-radius: 6px;
                 border: none;
             }
-            QPushButton:hover { background-color: #005a9e; }
+            QPushButton:hover {
+                background-color: #005a9e;
+            }
         """)
         
         header_layout.addWidget(title)
@@ -597,7 +848,6 @@ class GoalsMainWidget(QWidget):
         layout.addLayout(header_layout)
         
         # Tab widget
-        from PyQt6.QtWidgets import QTabWidget
         self.tabs = QTabWidget()
         
         # Active Goals tab
@@ -608,6 +858,10 @@ class GoalsMainWidget(QWidget):
         # Daily Progress tab
         self.daily_progress_widget = DailyProgressWidget(self.goals_manager)
         self.tabs.addTab(self.daily_progress_widget, "📅 Today's Progress")
+        
+        # Analytics tab
+        self.analytics_widget = GoalsAnalyticsWidget(self.goals_manager)
+        self.tabs.addTab(self.analytics_widget, "📊 Analytics")
         
         layout.addWidget(self.tabs)
         self.setLayout(layout)
@@ -630,6 +884,7 @@ class GoalsMainWidget(QWidget):
     def create_new_goal(self):
         """Open create goal dialog"""
         try:
+            # Get available topics
             topics = self.db_manager.get_all_topics()
             
             if not topics:
@@ -645,17 +900,19 @@ class GoalsMainWidget(QWidget):
             
         except Exception as e:
             logger.error(f"Error opening create goal dialog: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to open goal creation dialog: {str(e)}")
     
     @pyqtSlot(dict)
     def on_goal_created(self, goal_data):
         """Handle new goal creation"""
         self.refresh_goals()
         self.daily_progress_widget.refresh_progress()
+        self.analytics_widget.refresh_analytics()
     
     def refresh_goals(self):
         """Refresh goals display"""
         try:
-            # Clear existing cards
+            # Clear existing goal cards
             for i in reversed(range(self.goals_layout.count())):
                 child = self.goals_layout.itemAt(i).widget()
                 if child:
@@ -668,7 +925,7 @@ class GoalsMainWidget(QWidget):
                 no_goals_label = QLabel("""
                     <div style='text-align: center; padding: 40px;'>
                         <h2>🎯 No Active Goals</h2>
-                        <p>Create your first study goal to start tracking progress!</p>
+                        <p>Create your first study goal to start tracking your progress!</p>
                         <p style='color: #666;'>Goals help you stay motivated and organized.</p>
                     </div>
                 """)
@@ -676,8 +933,9 @@ class GoalsMainWidget(QWidget):
                 self.goals_layout.addWidget(no_goals_label)
             else:
                 for goal in active_goals:
-                    goal_card = GoalCard(goal)
+                    goal_card = GoalCard(goal, goal.get('daily_plan'))
                     goal_card.goal_clicked.connect(self.on_goal_clicked)
+                    goal_card.goal_modified.connect(self.on_goal_modified)
                     self.goals_layout.addWidget(goal_card)
             
             self.goals_layout.addStretch()
@@ -689,21 +947,29 @@ class GoalsMainWidget(QWidget):
     def on_goal_clicked(self, goal_id):
         """Handle goal card click"""
         try:
+            # Get goal analytics
             analytics = self.goals_manager.get_goal_analytics(goal_id)
+            
+            # Show goal details dialog
             self.show_goal_details(goal_id, analytics)
+            
         except Exception as e:
             logger.error(f"Error handling goal click: {e}")
     
+    @pyqtSlot(int)
+    def on_goal_modified(self, goal_id):
+        """Handle goal modification"""
+        self.refresh_goals()
+        self.daily_progress_widget.refresh_progress()
+        self.analytics_widget.refresh_analytics()
+    
     def show_goal_details(self, goal_id, analytics):
-        """Show goal details"""
-        progress_data = analytics.get('progress_data', [])
-        QMessageBox.information(
-            self, "Goal Details", 
-            f"Goal {goal_id} has {len(progress_data)} days of progress data"
-        )
+        """Show detailed goal information dialog"""
+        # TODO: Implement detailed goal view dialog
+        QMessageBox.information(self, "Goal Details", f"Goal {goal_id} analytics: {len(analytics.get('progress_data', []))} days of data")
     
     def update_after_session(self, topic_id, pages_read, time_spent_seconds):
-        """Update goals after study session"""
+        """Update goals after a study session"""
         try:
             self.goals_manager.update_progress_after_session(
                 topic_id=topic_id,
@@ -711,9 +977,10 @@ class GoalsMainWidget(QWidget):
                 time_spent_seconds=time_spent_seconds
             )
             
-            # Refresh displays
+            # Refresh all displays
             self.refresh_goals()
             self.daily_progress_widget.refresh_progress()
+            self.analytics_widget.refresh_analytics()
             
         except Exception as e:
             logger.error(f"Error updating goals after session: {e}")
