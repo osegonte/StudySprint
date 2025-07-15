@@ -2670,6 +2670,393 @@ def _get_goals_health_status(self, score):
     else:
         return 'critical'
 
+def initialize_optimized_system(self):
+    """Initialize the optimized timer and goals system tables"""
+    self.connect()
+    
+    logger.info("Initializing optimized timer and goals system...")
+    
+    # Ensure core tables exist first
+    self.initialize_database()
+    
+    # Create goals system tables
+    self.create_goals_tables()
+    
+    # Create timer system tables  
+    self.create_timer_tables()
+    
+    logger.info("✅ Optimized system initialized successfully")
+
+def create_timer_tables(self):
+    """Create optimized timer system tables"""
+    try:
+        logger.info("Creating optimized timer tables...")
+        
+        # Sessions table (already exists but ensure it's optimized)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id SERIAL PRIMARY KEY,
+                pdf_id INTEGER REFERENCES pdfs(id) ON DELETE CASCADE,
+                exercise_pdf_id INTEGER REFERENCES exercise_pdfs(id) ON DELETE CASCADE,
+                topic_id INTEGER,
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                end_time TIMESTAMP,
+                total_time_seconds INTEGER DEFAULT 0,
+                active_time_seconds INTEGER DEFAULT 0,
+                idle_time_seconds INTEGER DEFAULT 0,
+                pages_visited INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                CONSTRAINT check_pdf_type CHECK (
+                    (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                    (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                )
+            )
+        """)
+        
+        # Page times table (optimized)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS page_times (
+                id SERIAL PRIMARY KEY,
+                session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+                pdf_id INTEGER,
+                exercise_pdf_id INTEGER,
+                page_number INTEGER NOT NULL,
+                duration_seconds INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                CONSTRAINT check_page_pdf_type CHECK (
+                    (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                    (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                )
+            )
+        """)
+        
+        # Reading metrics table (optimized)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reading_metrics (
+                id SERIAL PRIMARY KEY,
+                pdf_id INTEGER,
+                exercise_pdf_id INTEGER,
+                topic_id INTEGER,
+                user_id VARCHAR(50) DEFAULT 'default_user',
+                pages_per_minute DECIMAL(8,2),
+                average_time_per_page_seconds INTEGER,
+                total_pages_read INTEGER DEFAULT 0,
+                total_time_spent_seconds INTEGER DEFAULT 0,
+                last_calculated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                CONSTRAINT check_metrics_pdf_type CHECK (
+                    (pdf_id IS NOT NULL AND exercise_pdf_id IS NULL) OR 
+                    (pdf_id IS NULL AND exercise_pdf_id IS NOT NULL)
+                )
+            )
+        """)
+        
+        # Create optimized indexes
+        timer_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_topic_id ON sessions(topic_id)",
+            "CREATE INDEX IF NOT EXISTS idx_page_times_session_id ON page_times(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_reading_metrics_user_topic ON reading_metrics(user_id, topic_id)"
+        ]
+        
+        for index_sql in timer_indexes:
+            try:
+                self.cursor.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Could not create index: {e}")
+        
+        self.connection.commit()
+        logger.info("✅ Optimized timer tables created")
+        
+    except Exception as e:
+        logger.error(f"Error creating timer tables: {e}")
+        raise
+
+def create_goals_tables(self):
+    """Create optimized goals system tables"""
+    try:
+        logger.info("Creating optimized goals tables...")
+        
+        # Goals table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS goals (
+                id SERIAL PRIMARY KEY,
+                topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,
+                target_type TEXT CHECK (target_type IN ('finish_by_date', 'daily_time', 'daily_pages')),
+                target_value INTEGER NOT NULL DEFAULT 0,
+                deadline DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                is_completed BOOLEAN DEFAULT FALSE,
+                completion_date TIMESTAMP,
+                
+                CONSTRAINT valid_deadline CHECK (
+                    (target_type = 'finish_by_date' AND deadline IS NOT NULL) OR
+                    (target_type != 'finish_by_date')
+                ),
+                CONSTRAINT valid_target_value CHECK (
+                    (target_type = 'finish_by_date' AND target_value >= 0) OR
+                    (target_type != 'finish_by_date' AND target_value > 0)
+                )
+            )
+        """)
+        
+        # Goal progress table
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS goal_progress (
+                id SERIAL PRIMARY KEY,
+                goal_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                pages_read INTEGER DEFAULT 0,
+                time_spent_minutes INTEGER DEFAULT 0,
+                sessions_count INTEGER DEFAULT 0,
+                target_met BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                UNIQUE (goal_id, date),
+                
+                CONSTRAINT non_negative_pages CHECK (pages_read >= 0),
+                CONSTRAINT non_negative_time CHECK (time_spent_minutes >= 0),
+                CONSTRAINT non_negative_sessions CHECK (sessions_count >= 0)
+            )
+        """)
+        
+        # Create optimized indexes
+        goals_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_goals_topic_active ON goals(topic_id, is_active)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_progress_date ON goal_progress(goal_id, date)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_progress_recent ON goal_progress(date DESC)"
+        ]
+        
+        for index_sql in goals_indexes:
+            try:
+                self.cursor.execute(index_sql)
+            except Exception as e:
+                logger.warning(f"Could not create index: {e}")
+        
+        self.connection.commit()
+        logger.info("✅ Optimized goals tables created")
+        
+    except Exception as e:
+        logger.error(f"Error creating goals tables: {e}")
+        raise
+
+# Optimized session management methods
+def create_session_optimized(self, pdf_id=None, exercise_pdf_id=None, topic_id=None):
+    """Optimized session creation"""
+    try:
+        with self.transaction():
+            self.cursor.execute("""
+                INSERT INTO sessions (pdf_id, exercise_pdf_id, topic_id, start_time)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP) RETURNING id
+            """, (pdf_id, exercise_pdf_id, topic_id))
+            
+            session_id = self.cursor.fetchone()['id']
+            logger.debug(f"Created session {session_id}")
+            return session_id
+            
+    except Exception as e:
+        logger.error(f"Failed to create session: {e}")
+        raise
+
+def end_session_optimized(self, session_id, total_time_seconds, active_time_seconds, 
+                         idle_time_seconds, pages_visited):
+    """Optimized session completion"""
+    try:
+        with self.transaction():
+            self.cursor.execute("""
+                UPDATE sessions 
+                SET end_time = CURRENT_TIMESTAMP,
+                    total_time_seconds = %s,
+                    active_time_seconds = %s,
+                    idle_time_seconds = %s,
+                    pages_visited = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING pdf_id, exercise_pdf_id, topic_id
+            """, (total_time_seconds, active_time_seconds, idle_time_seconds, 
+                  pages_visited, session_id))
+            
+            result = self.cursor.fetchone()
+            if result:
+                logger.debug(f"Ended session {session_id}")
+                return dict(result)
+            return None
+            
+    except Exception as e:
+        logger.error(f"Failed to end session: {e}")
+        raise
+
+def save_page_time_optimized(self, session_id, pdf_id=None, exercise_pdf_id=None, 
+                            page_number=1, duration_seconds=0):
+    """Optimized page time saving"""
+    try:
+        with self.transaction():
+            self.cursor.execute("""
+                INSERT INTO page_times (session_id, pdf_id, exercise_pdf_id, page_number, duration_seconds)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (session_id, pdf_id, exercise_pdf_id, page_number, duration_seconds))
+            
+    except Exception as e:
+        logger.error(f"Failed to save page time: {e}")
+        raise
+
+def update_reading_metrics_optimized(self, pdf_id=None, exercise_pdf_id=None, topic_id=None,
+                                   pages_per_minute=0, average_time_per_page_seconds=0,
+                                   pages_read=0, time_spent_seconds=0):
+    """Optimized reading metrics update"""
+    try:
+        with self.transaction():
+            # Check for existing metrics
+            self.cursor.execute("""
+                SELECT id, total_pages_read, total_time_spent_seconds 
+                FROM reading_metrics 
+                WHERE pdf_id IS NOT DISTINCT FROM %s
+                AND exercise_pdf_id IS NOT DISTINCT FROM %s
+                AND topic_id IS NOT DISTINCT FROM %s
+                LIMIT 1
+            """, (pdf_id, exercise_pdf_id, topic_id))
+            
+            existing = self.cursor.fetchone()
+            
+            if existing:
+                # Update existing
+                new_total_pages = existing['total_pages_read'] + pages_read
+                new_total_time = existing['total_time_spent_seconds'] + time_spent_seconds
+                
+                if new_total_pages > 0 and new_total_time > 0:
+                    new_avg_time = new_total_time / new_total_pages
+                    new_pages_per_minute = new_total_pages / (new_total_time / 60.0)
+                else:
+                    new_avg_time = average_time_per_page_seconds
+                    new_pages_per_minute = pages_per_minute
+                
+                self.cursor.execute("""
+                    UPDATE reading_metrics 
+                    SET pages_per_minute = %s,
+                        average_time_per_page_seconds = %s,
+                        total_pages_read = %s,
+                        total_time_spent_seconds = %s,
+                        last_calculated = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (new_pages_per_minute, new_avg_time, new_total_pages, 
+                      new_total_time, existing['id']))
+            else:
+                # Create new
+                self.cursor.execute("""
+                    INSERT INTO reading_metrics 
+                    (pdf_id, exercise_pdf_id, topic_id, pages_per_minute,
+                     average_time_per_page_seconds, total_pages_read, total_time_spent_seconds)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (pdf_id, exercise_pdf_id, topic_id, pages_per_minute,
+                      average_time_per_page_seconds, pages_read, time_spent_seconds))
+            
+    except Exception as e:
+        logger.error(f"Failed to update reading metrics: {e}")
+        raise
+
+def get_reading_metrics_optimized(self, pdf_id=None, exercise_pdf_id=None, topic_id=None, user_wide=False):
+    """Optimized reading metrics retrieval"""
+    try:
+        if user_wide:
+            self.cursor.execute("""
+                SELECT 
+                    AVG(pages_per_minute) as pages_per_minute,
+                    AVG(average_time_per_page_seconds) as average_time_per_page_seconds,
+                    SUM(total_pages_read) as total_pages_read,
+                    SUM(total_time_spent_seconds) as total_time_spent_seconds
+                FROM reading_metrics
+                WHERE total_pages_read > 0
+            """)
+        else:
+            self.cursor.execute("""
+                SELECT pages_per_minute, average_time_per_page_seconds, 
+                       total_pages_read, total_time_spent_seconds, last_calculated
+                FROM reading_metrics 
+                WHERE pdf_id IS NOT DISTINCT FROM %s
+                AND exercise_pdf_id IS NOT DISTINCT FROM %s
+                AND topic_id IS NOT DISTINCT FROM %s
+                ORDER BY last_calculated DESC
+                LIMIT 1
+            """, (pdf_id, exercise_pdf_id, topic_id))
+        
+        result = self.cursor.fetchone()
+        return dict(result) if result else None
+        
+    except Exception as e:
+        logger.error(f"Failed to get reading metrics: {e}")
+        return None
+
+def get_session_history_optimized(self, days=7, pdf_id=None, exercise_pdf_id=None):
+    """Optimized session history retrieval"""
+    try:
+        base_query = """
+            SELECT s.id, s.start_time, s.end_time, s.total_time_seconds, 
+                   s.active_time_seconds, s.pages_visited,
+                   p.title as pdf_title, e.title as exercise_title
+            FROM sessions s
+            LEFT JOIN pdfs p ON s.pdf_id = p.id
+            LEFT JOIN exercise_pdfs e ON s.exercise_pdf_id = e.id
+            WHERE s.start_time >= CURRENT_DATE - INTERVAL '%s days'
+            AND s.end_time IS NOT NULL
+        """
+        
+        params = [days]
+        
+        if pdf_id:
+            base_query += " AND s.pdf_id = %s"
+            params.append(pdf_id)
+        elif exercise_pdf_id:
+            base_query += " AND s.exercise_pdf_id = %s"
+            params.append(exercise_pdf_id)
+        
+        base_query += " ORDER BY s.start_time DESC LIMIT 50"
+        
+        self.cursor.execute(base_query, params)
+        results = self.cursor.fetchall()
+        
+        return [dict(row) for row in results]
+        
+    except Exception as e:
+        logger.error(f"Failed to get session history: {e}")
+        return []
+
+def get_daily_reading_stats_optimized(self, target_date):
+    """Optimized daily stats retrieval"""
+    try:
+        self.cursor.execute("""
+            SELECT 
+                COUNT(*) as sessions_count,
+                COALESCE(SUM(total_time_seconds), 0) as total_time_seconds,
+                COALESCE(SUM(pages_visited), 0) as total_pages_read,
+                COALESCE(AVG(total_time_seconds), 0) as avg_session_time
+            FROM sessions
+            WHERE DATE(start_time) = %s AND end_time IS NOT NULL
+        """, (target_date,))
+        
+        result = self.cursor.fetchone()
+        return dict(result) if result else None
+        
+    except Exception as e:
+        logger.error(f"Failed to get daily stats: {e}")
+        return None
+
+# Alias the optimized methods to the standard names for compatibility
+create_session = create_session_optimized
+end_session = end_session_optimized
+save_page_time = save_page_time_optimized
+update_reading_metrics = update_reading_metrics_optimized
+get_reading_metrics = get_reading_metrics_optimized
+get_session_history = get_session_history_optimized
+get_daily_reading_stats = get_daily_reading_stats_optimized
 # IMPORTANT: Add this call to your existing initialize_database method
 def initialize_database_with_goals(self):
     """Enhanced initialize_database method that includes goals"""

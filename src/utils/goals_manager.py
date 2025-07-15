@@ -1,9 +1,9 @@
-# src/utils/goals_manager.py - Fixed version
+# src/utils/goals_manager.py - Optimized Version
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-import logging
-from dataclasses import dataclass
+from typing import Dict, List, Optional
 from enum import Enum
+from dataclasses import dataclass
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -23,36 +23,30 @@ class GoalStatus(Enum):
 @dataclass
 class DailyPlan:
     goal_id: int
-    goal_type: GoalType
-    pages_needed_today: int
-    time_needed_today: int
-    pages_behind: int
-    days_remaining: int
-    adjusted_daily_target: int
+    pages_needed: int
+    time_needed: int
     status: GoalStatus
     message: str
 
 class GoalsManager:
-    """Goal setting and progress tracking system"""
+    """Optimized goal management system"""
     
     def __init__(self, db_manager):
         self.db_manager = db_manager
-        
+    
     def create_goal(self, topic_id: int, target_type: GoalType, target_value: int, 
                    deadline: Optional[date] = None) -> Optional[int]:
-        """Create a new study goal"""
+        """Create a new goal"""
         try:
             # Validate inputs
             if target_type == GoalType.FINISH_BY_DATE:
                 if not deadline or deadline <= date.today():
-                    logger.error("Invalid deadline for finish_by_date goal")
                     return None
-                target_value = 0  # Not used for deadline goals
+                target_value = 0
             elif target_value <= 0:
-                logger.error("Target value must be positive for daily goals")
                 return None
             
-            # Create goal in database
+            # Create in database
             with self.db_manager.transaction():
                 self.db_manager.cursor.execute("""
                     INSERT INTO goals (topic_id, target_type, target_value, deadline)
@@ -68,12 +62,15 @@ class GoalsManager:
             return None
     
     def get_active_goals(self, topic_id: Optional[int] = None) -> List[Dict]:
-        """Get all active goals"""
+        """Get all active goals with enhanced data"""
         try:
             base_query = """
-                SELECT g.*, t.name as topic_name
+                SELECT g.*, t.name as topic_name,
+                       COALESCE(SUM(gp.pages_read), 0) as total_pages_read,
+                       COALESCE(SUM(gp.time_spent_minutes), 0) as total_time_spent
                 FROM goals g
                 LEFT JOIN topics t ON g.topic_id = t.id
+                LEFT JOIN goal_progress gp ON g.id = gp.goal_id
                 WHERE g.is_active = TRUE AND g.is_completed = FALSE
             """
             
@@ -82,17 +79,16 @@ class GoalsManager:
                 base_query += " AND g.topic_id = %s"
                 params.append(topic_id)
             
-            base_query += " ORDER BY g.created_at DESC"
+            base_query += " GROUP BY g.id, t.name ORDER BY g.created_at DESC"
             
             self.db_manager.cursor.execute(base_query, params)
             goals = self.db_manager.cursor.fetchall()
             
-            # Add basic status and progress
+            # Enhance with status and progress
             enhanced_goals = []
             for goal in goals:
                 goal_dict = dict(goal)
-                goal_dict['status'] = 'on_track'  # Simple default
-                goal_dict['progress_percentage'] = 0.0  # Simple default
+                goal_dict.update(self._calculate_goal_status(goal_dict))
                 enhanced_goals.append(goal_dict)
             
             return enhanced_goals
@@ -103,26 +99,15 @@ class GoalsManager:
     
     def update_progress_after_session(self, topic_id: int, pages_read: int, 
                                     time_spent_seconds: int, session_date: Optional[date] = None):
-        """Update goal progress after a study session"""
+        """Update goal progress after session"""
         try:
             if session_date is None:
                 session_date = date.today()
                 
             time_spent_minutes = time_spent_seconds // 60
             
-            # Manual progress update (safe fallback)
-            self._manual_update_progress(topic_id, pages_read, time_spent_minutes, session_date)
-            
-            logger.info(f"Updated goal progress: topic {topic_id}, {pages_read} pages, {time_spent_minutes}m")
-            
-        except Exception as e:
-            logger.error(f"Error updating progress: {e}")
-    
-    def _manual_update_progress(self, topic_id: int, pages_read: int, time_spent_minutes: int, session_date: date):
-        """Manual progress update - safe fallback method"""
-        try:
             with self.db_manager.transaction():
-                # Get active goals for this topic
+                # Get active goals for topic
                 self.db_manager.cursor.execute("""
                     SELECT id, target_type, target_value 
                     FROM goals 
@@ -132,45 +117,20 @@ class GoalsManager:
                 goals = self.db_manager.cursor.fetchall()
                 
                 for goal in goals:
-                    goal_id = goal['id']
-                    target_type = goal['target_type']
-                    target_value = goal['target_value']
-                    
-                    # Insert or update today's progress
-                    self.db_manager.cursor.execute("""
-                        INSERT INTO goal_progress (goal_id, date, pages_read, time_spent_minutes, sessions_count)
-                        VALUES (%s, %s, %s, %s, 1)
-                        ON CONFLICT (goal_id, date) 
-                        DO UPDATE SET
-                            pages_read = goal_progress.pages_read + EXCLUDED.pages_read,
-                            time_spent_minutes = goal_progress.time_spent_minutes + EXCLUDED.time_spent_minutes,
-                            sessions_count = goal_progress.sessions_count + EXCLUDED.sessions_count,
-                            updated_at = CURRENT_TIMESTAMP
-                    """, (goal_id, session_date, pages_read, time_spent_minutes))
-                    
-                    # Update target_met status
-                    self.db_manager.cursor.execute("""
-                        UPDATE goal_progress SET
-                            target_met = CASE 
-                                WHEN %s = 'daily_pages' THEN pages_read >= %s
-                                WHEN %s = 'daily_time' THEN time_spent_minutes >= %s
-                                ELSE target_met
-                            END,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE goal_id = %s AND date = %s
-                    """, (target_type, target_value, target_type, target_value, goal_id, session_date))
-                
+                    self._update_goal_progress(goal, pages_read, time_spent_minutes, session_date)
+            
+            logger.info(f"Updated goals for topic {topic_id}: {pages_read} pages, {time_spent_minutes}m")
+            
         except Exception as e:
-            logger.error(f"Error in manual update progress: {e}")
-            raise
+            logger.error(f"Error updating progress: {e}")
     
     def get_today_progress(self, topic_id: Optional[int] = None) -> Dict:
-        """Get today's progress for goals"""
+        """Get today's goal progress"""
         try:
-            # Simple implementation - get daily goals for today
             today = date.today()
             
-            base_query = """
+            # Get daily goals
+            daily_query = """
                 SELECT g.*, t.name as topic_name,
                        COALESCE(gp.pages_read, 0) as pages_read_today,
                        COALESCE(gp.time_spent_minutes, 0) as time_spent_today,
@@ -179,37 +139,45 @@ class GoalsManager:
                 LEFT JOIN topics t ON g.topic_id = t.id
                 LEFT JOIN goal_progress gp ON g.id = gp.goal_id AND gp.date = %s
                 WHERE g.is_active = TRUE AND g.is_completed = FALSE
+                AND g.target_type IN ('daily_pages', 'daily_time')
+            """
+            
+            # Get deadline goals
+            deadline_query = """
+                SELECT g.*, t.name as topic_name,
+                       COALESCE(gp.pages_read, 0) as pages_read_today,
+                       COALESCE(gp.time_spent_minutes, 0) as time_spent_today
+                FROM goals g
+                LEFT JOIN topics t ON g.topic_id = t.id
+                LEFT JOIN goal_progress gp ON g.id = gp.goal_id AND gp.date = %s
+                WHERE g.is_active = TRUE AND g.is_completed = FALSE
+                AND g.target_type = 'finish_by_date'
             """
             
             params = [today]
             if topic_id:
-                base_query += " AND g.topic_id = %s"
+                daily_query += " AND g.topic_id = %s"
+                deadline_query += " AND g.topic_id = %s"
                 params.append(topic_id)
             
-            self.db_manager.cursor.execute(base_query, params)
-            results = self.db_manager.cursor.fetchall()
+            # Execute queries
+            self.db_manager.cursor.execute(daily_query, params)
+            daily_goals = [dict(row) for row in self.db_manager.cursor.fetchall()]
             
-            # Organize by goal type
-            daily_goals = []
-            deadline_goals = []
+            self.db_manager.cursor.execute(deadline_query, params[:1] + ([topic_id] if topic_id else []))
+            deadline_goals = [dict(row) for row in self.db_manager.cursor.fetchall()]
             
-            for result in results:
-                goal_dict = dict(result)
-                if goal_dict['target_type'] in ['daily_pages', 'daily_time']:
-                    daily_goals.append(goal_dict)
-                else:
-                    deadline_goals.append(goal_dict)
+            # Calculate overall status
+            completed_daily = sum(1 for g in daily_goals if g['target_met_today'])
+            total_daily = len(daily_goals)
             
-            completed_count = sum(1 for g in daily_goals if g['target_met_today'])
-            total_count = len(daily_goals)
-            
-            if total_count == 0:
+            if total_daily == 0:
                 overall_status = 'no_goals'
-            elif completed_count == total_count:
+            elif completed_daily == total_daily:
                 overall_status = 'all_completed'
-            elif completed_count >= total_count * 0.7:
+            elif completed_daily >= total_daily * 0.7:
                 overall_status = 'mostly_completed'
-            elif completed_count > 0:
+            elif completed_daily > 0:
                 overall_status = 'partially_completed'
             else:
                 overall_status = 'none_completed'
@@ -225,9 +193,8 @@ class GoalsManager:
             return {'daily_goals': [], 'deadline_goals': [], 'overall_status': 'error'}
     
     def get_goal_analytics(self, goal_id: int, days: int = 30) -> Dict:
-        """Get basic analytics for a goal"""
+        """Get goal analytics"""
         try:
-            # Simple implementation
             self.db_manager.cursor.execute("""
                 SELECT date, pages_read, time_spent_minutes, target_met
                 FROM goal_progress
@@ -239,9 +206,141 @@ class GoalsManager:
             
             return {
                 'goal_id': goal_id,
-                'progress_data': progress_data
+                'progress_data': progress_data,
+                'analytics': self._calculate_analytics(progress_data)
             }
             
         except Exception as e:
             logger.error(f"Error getting goal analytics: {e}")
             return {}
+    
+    def _update_goal_progress(self, goal, pages_read, time_spent_minutes, session_date):
+        """Update individual goal progress"""
+        goal_id = goal['id']
+        target_type = goal['target_type']
+        target_value = goal['target_value']
+        
+        # Insert or update progress
+        self.db_manager.cursor.execute("""
+            INSERT INTO goal_progress (goal_id, date, pages_read, time_spent_minutes, sessions_count)
+            VALUES (%s, %s, %s, %s, 1)
+            ON CONFLICT (goal_id, date) 
+            DO UPDATE SET
+                pages_read = goal_progress.pages_read + EXCLUDED.pages_read,
+                time_spent_minutes = goal_progress.time_spent_minutes + EXCLUDED.time_spent_minutes,
+                sessions_count = goal_progress.sessions_count + EXCLUDED.sessions_count,
+                updated_at = CURRENT_TIMESTAMP
+        """, (goal_id, session_date, pages_read, time_spent_minutes))
+        
+        # Update target_met status
+        self.db_manager.cursor.execute("""
+            UPDATE goal_progress SET
+                target_met = CASE 
+                    WHEN %s = 'daily_pages' THEN pages_read >= %s
+                    WHEN %s = 'daily_time' THEN time_spent_minutes >= %s
+                    ELSE target_met
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE goal_id = %s AND date = %s
+        """, (target_type, target_value, target_type, target_value, goal_id, session_date))
+    
+    def _calculate_goal_status(self, goal) -> Dict:
+        """Calculate goal status and progress"""
+        target_type = goal['target_type']
+        
+        if target_type == 'finish_by_date':
+            return self._calculate_deadline_status(goal)
+        else:
+            return self._calculate_daily_status(goal)
+    
+    def _calculate_deadline_status(self, goal) -> Dict:
+        """Calculate status for deadline goals"""
+        try:
+            deadline = goal['deadline']
+            if isinstance(deadline, str):
+                deadline = datetime.fromisoformat(deadline).date()
+            
+            days_remaining = (deadline - date.today()).days
+            
+            # Get topic progress
+            topic_id = goal['topic_id']
+            pdfs = self.db_manager.get_pdfs_by_topic(topic_id)
+            
+            total_pages = sum(pdf.get('total_pages', 0) for pdf in pdfs)
+            read_pages = sum(pdf.get('current_page', 1) - 1 for pdf in pdfs)
+            
+            progress_percent = (read_pages / total_pages * 100) if total_pages > 0 else 0
+            
+            # Determine status
+            if progress_percent >= 100:
+                status = GoalStatus.COMPLETED
+            elif days_remaining <= 0:
+                status = GoalStatus.VERY_BEHIND
+            else:
+                expected_progress = ((goal['created_at'].date() - deadline).days + days_remaining) / (goal['created_at'].date() - deadline).days * 100
+                if progress_percent >= expected_progress:
+                    status = GoalStatus.ON_TRACK
+                elif progress_percent >= expected_progress * 0.8:
+                    status = GoalStatus.SLIGHTLY_BEHIND
+                else:
+                    status = GoalStatus.BEHIND
+            
+            return {
+                'status': status.value,
+                'progress_percentage': progress_percent,
+                'days_remaining': days_remaining,
+                'pages_remaining': max(0, total_pages - read_pages)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating deadline status: {e}")
+            return {'status': 'on_track', 'progress_percentage': 0}
+    
+    def _calculate_daily_status(self, goal) -> Dict:
+        """Calculate status for daily goals"""
+        today_progress = goal.get('total_pages_read', 0) if goal['target_type'] == 'daily_pages' else goal.get('total_time_spent', 0)
+        target = goal['target_value']
+        
+        progress_percent = (today_progress / target * 100) if target > 0 else 0
+        
+        if progress_percent >= 100:
+            status = GoalStatus.COMPLETED
+        elif progress_percent >= 75:
+            status = GoalStatus.ON_TRACK
+        elif progress_percent >= 50:
+            status = GoalStatus.SLIGHTLY_BEHIND
+        else:
+            status = GoalStatus.BEHIND
+        
+        return {
+            'status': status.value,
+            'progress_percentage': min(100, progress_percent),
+            'current_value': today_progress,
+            'target_value': target
+        }
+    
+    def _calculate_analytics(self, progress_data) -> Dict:
+        """Calculate basic analytics from progress data"""
+        if not progress_data:
+            return {}
+        
+        total_days = len(progress_data)
+        met_days = sum(1 for day in progress_data if day['target_met'])
+        completion_rate = (met_days / total_days * 100) if total_days > 0 else 0
+        
+        return {
+            'total_days': total_days,
+            'successful_days': met_days,
+            'completion_rate': completion_rate,
+            'streak_days': self._calculate_current_streak(progress_data)
+        }
+    
+    def _calculate_current_streak(self, progress_data) -> int:
+        """Calculate current streak of successful days"""
+        streak = 0
+        for day in sorted(progress_data, key=lambda x: x['date'], reverse=True):
+            if day['target_met']:
+                streak += 1
+            else:
+                break
+        return streak
