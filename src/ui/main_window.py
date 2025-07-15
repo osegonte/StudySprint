@@ -1014,3 +1014,4 @@ class MainWindow(QMainWindow):
         self.apply_styles()
         self.start_background_tasks()
         self.load_topics()
+
